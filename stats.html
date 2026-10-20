@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Saat Chara · Visitors</title>
+  <meta name="description" content="How many people have played Saat Chara (সাত চাড়া): visits, unique visitors and matches played." />
+  <meta name="theme-color" content="#1f4d2b" />
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+Da+2:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #2b2118;
+      --ink-soft: #5c4a3a;
+      --muted: #8a7660;
+      --cream: #fff7e8;
+      --cream-2: #f6e8cc;
+      --line: #e4d0ab;
+      --grid: #eadcc0;
+      --brick: #c4553a;
+      --brick-dark: #8f3524;
+      --mango: #f2a83b;
+      --leaf: #2f7d3f;
+      --bg: #17321e;
+      --font: "Baloo Da 2", system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      min-height: 100vh;
+      font-family: var(--font);
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse at 50% -10%, rgba(106,168,77,0.55), transparent 60%),
+        linear-gradient(180deg, #24502d 0%, var(--bg) 70%);
+      padding: max(16px, env(safe-area-inset-top)) 16px 40px;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      color: var(--cream);
+      margin: 8px 0 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-stack { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .brand-stack i { display: block; height: 6px; border-radius: 2px; background: linear-gradient(180deg, #d66a4b, #a9432c); }
+    h1 { margin: 0; line-height: 1; font-size: clamp(1.6rem, 5vw, 2.4rem); font-weight: 800; }
+    h1 small { display: block; font-size: 0.5em; color: var(--mango); letter-spacing: 0.12em; text-transform: uppercase; margin-top: 6px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      appearance: none;
+      border: 0;
+      border-radius: 14px;
+      padding: 9px 18px 7px;
+      font: inherit;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      text-decoration: none;
+      color: var(--ink);
+      background: var(--cream);
+      box-shadow: 0 4px 0 var(--line);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-primary { background: var(--brick); color: #fff; box-shadow: 0 4px 0 var(--brick-dark); }
+    .btn:active { transform: translateY(3px); box-shadow: none; }
+    .btn:focus-visible { outline: 3px solid var(--mango); outline-offset: 2px; }
+
+    .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+    .tile {
+      background: var(--cream);
+      border-radius: 18px;
+      padding: 14px 16px 12px;
+      box-shadow: 0 5px 0 rgba(0,0,0,0.18);
+    }
+    .tile .label { font-size: 0.8rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+    .tile .value { font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .tile .sub { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+    .tile.hero .value { color: var(--brick); }
+    .tiles.small { grid-template-columns: repeat(3, 1fr); }
+    .tiles.small .value { font-size: clamp(1.4rem, 4vw, 1.9rem); }
+
+    .panel {
+      background: var(--cream);
+      border-radius: 18px;
+      padding: 16px 18px 14px;
+      box-shadow: 0 5px 0 rgba(0,0,0,0.18);
+      margin-bottom: 12px;
+    }
+    .panel h2 { margin: 0; font-size: 1.15rem; font-weight: 800; }
+    .panel .desc { margin: 0 0 8px; color: var(--muted); font-size: 0.9rem; font-weight: 600; }
+
+    .chart { position: relative; }
+    .chart svg { display: block; width: 100%; height: 240px; overflow: visible; }
+    .chart .gridline { stroke: var(--grid); stroke-width: 1; }
+    .chart .axis-label { fill: var(--muted); font-size: 12px; font-family: var(--font); font-weight: 600; }
+    .chart .bar { fill: var(--brick); }
+    .chart .bar.today { fill: var(--brick-dark); }
+    .chart .hit { fill: transparent; cursor: pointer; }
+    .chart .hit:hover + .bar, .chart .bar.active { fill: #e07756; }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: var(--ink);
+      color: var(--cream);
+      border-radius: 10px;
+      padding: 6px 10px 4px;
+      font-size: 0.88rem;
+      font-weight: 700;
+      white-space: nowrap;
+      transform: translate(-50%, -110%);
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .tooltip.on { opacity: 1; }
+    .tooltip span { color: var(--mango); }
+
+    .split { display: flex; height: 18px; border-radius: 9px; overflow: hidden; margin: 10px 0 8px; background: var(--cream-2); gap: 2px; }
+    .split div { height: 100%; }
+    .split .m { background: var(--brick); border-radius: 9px 0 0 9px; }
+    .split .d { background: var(--leaf); border-radius: 0 9px 9px 0; }
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; font-weight: 700; font-size: 0.95rem; color: var(--ink-soft); }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 1px; }
+
+    details { margin-top: 8px; }
+    summary { cursor: pointer; font-weight: 700; color: var(--ink-soft); font-size: 0.92rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 0.92rem; }
+    th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--grid); }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .note { color: rgba(255,247,232,0.75); font-size: 0.88rem; text-align: center; margin-top: 14px; line-height: 1.5; }
+    .note a { color: var(--mango); }
+    .status { color: var(--cream); font-weight: 600; font-size: 0.9rem; min-height: 1.4em; text-align: right; }
+    .skeleton { color: transparent !important; background: linear-gradient(90deg, var(--cream-2), #fff, var(--cream-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 8px; }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+
+    @media (max-width: 760px) {
+      .tiles { grid-template-columns: repeat(2, 1fr); }
+      .tiles.small { grid-template-columns: 1fr 1fr 1fr; }
+      .chart svg { height: 200px; }
+    }
+    @media (max-width: 420px) {
+      .tiles.small { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="brand-stack" aria-hidden="true"><i style="width:14px"></i><i style="width:20px"></i><i style="width:26px"></i><i style="width:32px"></i><i style="width:38px"></i></div>
+        <h1><span lang="bn">সাত চাড়া</span> <small data-s="title">Visitor stats</small></h1>
+      </div>
+      <div class="actions">
+        <button class="btn" id="refresh" type="button" data-s="refresh">Refresh</button>
+        <a class="btn btn-primary" href="./" data-s="play">Play the game</a>
+      </div>
+    </header>
+
+    <div class="tiles">
+      <div class="tile hero"><div class="label" data-s="visits">Total visits</div><div class="value skeleton" id="v-visits">0000</div><div class="sub" data-s="visitsSub">every time the game is opened</div></div>
+      <div class="tile"><div class="label" data-s="visitors">Unique visitors</div><div class="value skeleton" id="v-visitors">000</div><div class="sub" data-s="visitorsSub">different browsers</div></div>
+      <div class="tile"><div class="label" data-s="today">Visits today</div><div class="value skeleton" id="v-today">00</div><div class="sub" id="v-today-date"></div></div>
+      <div class="tile"><div class="label" data-s="matches">Matches played</div><div class="value skeleton" id="v-matches">000</div><div class="sub" data-s="matchesSub">quick matches and tournament</div></div>
+    </div>
+
+    <section class="panel">
+      <h2 data-s="dailyTitle">Visits per day</h2>
+      <p class="desc" data-s="dailyDesc">Last 14 days (UTC)</p>
+      <div class="chart" id="chart">
+        <svg id="chart-svg" role="img" aria-labelledby="chart-title"><title id="chart-title">Visits per day for the last 14 days</title></svg>
+        <div class="tooltip" id="tooltip"></div>
+      </div>
+      <details>
+        <summary data-s="table">Show as table</summary>
+        <table><thead><tr><th data-s="date">Date</th><th class="num" data-s="visitsCol">Visits</th></tr></thead><tbody id="table-body"></tbody></table>
+      </details>
+    </section>
+
+    <div class="tiles small">
+      <div class="tile"><div class="label" data-s="tutorials">Tutorials finished</div><div class="value skeleton" id="v-tutorials">00</div></div>
+      <div class="tile"><div class="label" data-s="champions">Upazila champions</div><div class="value skeleton" id="v-champions">0</div></div>
+      <div class="tile"><div class="label" data-s="perVisitor">Visits per visitor</div><div class="value skeleton" id="v-ratio">0.0</div></div>
+    </div>
+
+    <section class="panel">
+      <h2 data-s="devices">Devices</h2>
+      <div class="split" id="split" aria-hidden="true"><div class="m" style="width:0"></div><div class="d" style="width:0"></div></div>
+      <div class="legend">
+        <span><i style="background:var(--brick)"></i><span data-s="mobile">Phones &amp; tablets</span>: <b id="v-mobile">–</b></span>
+        <span><i style="background:var(--leaf)"></i><span data-s="desktop">Computers</span>: <b id="v-desktop">–</b></span>
+      </div>
+    </section>
+
+    <div class="status" id="status" aria-live="polite"></div>
+    <p class="note" data-s-html="note">Counts are anonymous: no cookies, names or IP addresses are stored by this game. Numbers come from the free <a href="https://jasoncameron.dev/abacus/" rel="noopener">Abacus</a> counter and update in real time.</p>
+  </div>
+
+  <script src="js/counter.js"></script>
+  <script src="js/stats.js"></script>
+</body>
+</html>

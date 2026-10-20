@@ -435,7 +435,7 @@ kbd {
   display: flex;
   gap: 8px;
 }
-.hud-right { margin-right: 106px; }
+.hud-right { margin-right: 208px; }
 
 #hint {
   position: absolute;
@@ -553,8 +553,9 @@ kbd {
   animation: rotate-phone 1.8s ease-in-out infinite;
 }
 @keyframes rotate-phone { 40%, 70% { transform: rotate(-90deg); } }
+/* Menus work in any orientation; only the match itself needs the phone sideways. */
 @media (orientation: portrait) and (max-width: 700px) {
-  #rotate { display: flex; }
+  body.in-game #rotate { display: flex; }
 }
 
 /* ---------- Responsive ---------- */
@@ -867,7 +868,7 @@ body.touch #hint { display: none !important; }
   .hud-team { padding: 3px 4px 3px 7px; gap: 6px; border-radius: 12px; box-shadow: 0 2px 0 rgba(0,0,0,0.16); }
   .team-dot { width: 10px; height: 10px; box-shadow: 0 0 0 2px #fff; }
   .hud-score { font-size: 1.05rem; min-width: 24px; padding: 1px 5px 0; border-radius: 9px; }
-  .hud-right { margin-right: 40px; }
+  .hud-right { margin-right: 118px; }
   .hud-center { gap: 2px; }
   .hud-phase { font-size: 0.74rem; padding: 2px 10px 0; background: rgba(43, 33, 24, 0.6); }
   .hud-stones { gap: 2px; }
@@ -919,4 +920,127 @@ body.touch #hint { display: none !important; }
   .toast-icon { width: 28px; height: 28px; font-size: 1rem; }
   .toast-name { font-size: 0.9rem; }
   @keyframes toast-in { from { opacity: 0; } to { opacity: 1; } }
+}
+
+/* ---------- Phones: every menu fits on the screen ----------
+   Panels never grow past the screen; long ones scroll inside, and their
+   Back / Start buttons stay pinned at the bottom so they are always reachable. */
+@media (max-height: 560px), (max-width: 560px) {
+  .screen { padding: 8px; place-items: safe center; }
+  .panel {
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px 14px 0;
+    border-width: 2px;
+    outline-offset: -5px;
+    border-radius: 16px;
+  }
+  .panel h2 { font-size: 1.15rem; margin: 0 0 6px; }
+  .panel-lead { font-size: 0.82rem; line-height: 1.35; margin: -2px 0 8px; }
+  .panel .trophy, .result .trophy { width: 44px; height: 44px; font-size: 1.5rem; margin-bottom: 2px; }
+  .panel-actions {
+    position: sticky;
+    bottom: 0;
+    margin: 8px -14px 0;
+    padding: 8px 14px max(10px, env(safe-area-inset-bottom));
+    background: var(--cream);
+    box-shadow: 0 -6px 10px -6px rgba(43, 33, 24, 0.25);
+    gap: 8px;
+    z-index: 2;
+  }
+  .panel-actions .btn { min-width: 0; flex: 1 1 0; }
+  .panel-small .menu { padding-bottom: 12px; }
+  .btn { min-width: 0; font-size: 0.92rem; padding: 7px 14px 5px; border-radius: 12px; }
+  .panel .menu { gap: 8px; }
+  .panel .menu .btn { width: min(280px, 100%); }
+
+  .field-group { margin-bottom: 8px; }
+  .label { font-size: 0.66rem; margin-bottom: 4px; }
+  .row-2 { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .seg { padding: 3px; gap: 3px; border-radius: 10px; }
+  .seg button { font-size: 0.82rem; padding: 4px 4px 2px; border-radius: 8px; }
+
+  .team-picker { grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .team-card { padding: 6px 2px 4px; gap: 2px; border-radius: 12px; }
+  .team-card .kid { width: 26px; height: 32px; }
+  .team-card .kid::before { width: 15px; height: 15px; box-shadow: inset 0 5px 0 #2b1d14; }
+  .team-card .kid::after { width: 22px; height: 17px; border-radius: 7px 7px 4px 4px; }
+  .team-card span { font-size: 0.72rem; }
+
+  .field-picker { grid-template-columns: repeat(5, 1fr); gap: 5px; }
+  .field-card { font-size: 0.64rem; border-radius: 10px; padding-bottom: 4px; }
+  .field-card .swatch { height: 20px; margin-bottom: 3px; }
+  .field-card.locked::after { top: 2px; font-size: 0.75rem; }
+  .rules { padding: 6px 10px; border-radius: 10px; }
+  .rules summary { font-size: 0.7rem; }
+  .rule-list { gap: 4px; margin-top: 6px; }
+  .toggle { font-size: 0.82rem; gap: 8px; }
+  .toggle input { width: 16px; height: 16px; }
+  .rule-time { font-size: 0.82rem; }
+
+  .mode-picker { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .mode-card { padding: 6px 8px; border-radius: 12px; }
+  .mode-icon { font-size: 1.1rem; }
+  .mode-card b { font-size: 0.85rem; }
+  .mode-card small { font-size: 0.7rem; }
+  .room { padding: 8px; border-radius: 12px; }
+  .room-code { font-size: 1.6rem; }
+  .room-link { font-size: 0.72rem; margin: 2px 0 6px; }
+  .room-actions .btn { flex: 1 1 0; }
+  .online-status { font-size: 0.82rem; margin-top: 6px; }
+
+  .ladder { gap: 5px; }
+  .ladder li { grid-template-columns: 26px 1fr auto; gap: 8px; padding: 4px 8px 3px; border-radius: 10px; }
+  .ladder .rung { width: 24px; height: 24px; font-size: 0.8rem; }
+  .ladder .op-name { font-size: 0.85rem; }
+  .ladder .op-meta, .ladder .status { font-size: 0.66rem; }
+  .ladder-champion { font-size: 0.9rem; margin-top: 6px; }
+
+  .ach-grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .ach { grid-template-columns: 30px 1fr; gap: 8px; padding: 5px 8px 4px; border-radius: 10px; }
+  .ach .ach-icon { width: 30px; height: 30px; font-size: 0.95rem; }
+  .ach b { font-size: 0.8rem; }
+  .ach span { font-size: 0.7rem; }
+
+  .settings-list { gap: 6px; }
+  .setting-row { font-size: 0.85rem; gap: 6px; }
+  .setting-row .seg { min-width: 0; flex: 1 1 200px; max-width: 260px; }
+  .settings-actions { gap: 6px; margin-top: 10px; }
+
+  .steps { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .step { padding: 8px 10px 6px; border-radius: 12px; }
+  .step h3 { font-size: 0.88rem; margin: 0 0 2px 30px; }
+  .step p { font-size: 0.74rem; line-height: 1.35; }
+  .step-num { width: 22px; height: 22px; left: 8px; top: 7px; font-size: 0.75rem; }
+  .keys { font-size: 0.7rem; gap: 4px 10px; margin-top: 8px; }
+  kbd { font-size: 0.66rem; padding: 0 5px; }
+
+  .story p { font-size: 0.84rem; line-height: 1.45; margin-bottom: 8px; }
+
+  .result-score { font-size: 1rem; margin: 0 0 8px; }
+  .result-unlock { font-size: 0.85rem; margin: 0 0 6px; }
+  .stats { gap: 6px; margin-bottom: 10px; }
+  .stat { padding: 6px 2px 4px; border-radius: 10px; }
+  .stat b { font-size: 1.2rem; }
+  .stat span { font-size: 0.66rem; }
+  .result-ach { margin: 0 0 8px; }
+  .result-ach span { font-size: 0.75rem; }
+
+  .hud-phase { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* Narrow portrait phones: single columns where two would squeeze text. */
+@media (max-width: 480px) {
+  .team-picker { grid-template-columns: repeat(2, 1fr); }
+  .field-picker { grid-template-columns: repeat(3, 1fr); }
+  .mode-picker, .ach-grid, .steps { grid-template-columns: 1fr; }
+  .row-2 { grid-template-columns: 1fr 1fr; }
+  .logo-bn { font-size: 3rem; }
+  .logo-en { font-size: 0.8rem; letter-spacing: 0.12em; }
+  .tagline { font-size: 0.9rem; margin: 8px auto 14px; }
+  .menu-row { width: 100%; }
+  #screen-title .menu > .btn { min-width: 0; width: 100%; }
+  .lang-btn { padding: 5px 12px 3px; font-size: 0.85rem; }
 }

@@ -141,7 +141,7 @@
   const STORE_KEY = "saatchara.v1";
   const PREF_DEFAULTS = {
     lang: (navigator.language || "").toLowerCase().startsWith("bn") ? "bn" : "en",
-    sound: true, music: true, voice: true, shake: true, camera: "auto",
+    sound: true, music: true, voice: true, shake: true, camera: "auto", zoom: 1,
   };
   const PROGRESS_DEFAULTS = () => ({
     team: "tigers", difficulty: "normal", teamSize: 3, target: 3, field: "village",
@@ -2000,23 +2000,31 @@
     return settings.camera === "auto" && view.base < 0.62;
   }
 
+  const ZOOM_MIN = 0.6, ZOOM_MAX = 2.6;
+
   function updateCamera(dt) {
     const base = view.base;
-    let tk = base, tx = W / 2, ty = H / 2;
-    const follow = wantFollow();
-    if (follow) {
-      let cx = TOWER.x, cy = TOWER.y, VW = 980;
+    let tk = base;
+    const playing = G.mode === "play" && currentScreen === "game";
+    if (wantFollow()) {
+      const VW = G.phase === "throw" || G.phase === "intro" ? 860 : 980;
+      tk = Math.max(base, Math.min(view.cw / VW, view.ch / (VW * 0.56)));
+    }
+    // The player's own zoom (buttons, pinch or mouse wheel) scales whatever the camera chose.
+    if (playing) tk = clamp(tk * settings.zoom, base, base * 3.2);
+    let tx = W / 2, ty = H / 2;
+    if (tk > base * 1.02) {
+      let cx = TOWER.x, cy = TOWER.y;
       if (G.phase === "throw" || G.phase === "intro") {
-        cx = (G.throwPos.x + TOWER.x) / 2 + 40; cy = (G.throwPos.y + TOWER.y) / 2 - 20; VW = 860;
+        cx = (G.throwPos.x + TOWER.x) / 2 + 40; cy = (G.throwPos.y + TOWER.y) / 2 - 20;
       } else if (G.human && G.human.alive && G.phase === "rebuild") {
         cx = G.human.x; cy = G.human.y - 20;
       }
-      tk = Math.max(base, Math.min(view.cw / VW, view.ch / (VW * 0.56)));
       const hw = view.cw / (2 * tk), hh = view.ch / (2 * tk);
       tx = hw * 2 >= W ? W / 2 : clamp(cx, hw, W - hw);
       ty = hh * 2 >= H ? H / 2 : clamp(cy, hh, H - hh);
     }
-    cam.follow = follow && tk > base * 1.05;
+    cam.follow = tk > base * 1.05;
     if (cam.snap) {
       cam.k = tk; cam.x = tx; cam.y = ty; cam.snap = false;
     } else {
@@ -2025,6 +2033,11 @@
       cam.x += (tx - cam.x) * a;
       cam.y += (ty - cam.y) * a;
     }
+  }
+
+  function setZoom(z) {
+    settings.zoom = clamp(z, ZOOM_MIN, ZOOM_MAX);
+    saveSettings();
   }
 
   function resize() {
@@ -3147,7 +3160,33 @@
     try { canvas.setPointerCapture(pid); } catch (err) { /* pointer already gone */ }
   }
 
+  // Pinch with two fingers to zoom (unless one of them is steering with the joystick).
+  const touches = new Map();
+  let pinch = null;
+
+  function pinchDistance() {
+    const p = [...touches.values()];
+    return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+  }
+
+  canvas.addEventListener("wheel", (e) => {
+    if (G.mode !== "play" || currentScreen !== "game") return;
+    e.preventDefault();
+    setZoom(settings.zoom * Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
+
   canvas.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2 && input.joy.id === null && G.mode === "play") {
+        // Second finger down: this is a pinch, not a throw.
+        pinch = { d: pinchDistance(), z: settings.zoom };
+        if (G.localCtl) G.localCtl.charge.active = false;
+        input.aimId = null;
+        e.preventDefault();
+        return;
+      }
+    }
     Sound.unlock();
     if (e.pointerType === "touch") setTouchMode(true);
     const w = toWorld(e.clientX, e.clientY);
@@ -3173,6 +3212,13 @@
   });
 
   canvas.addEventListener("pointermove", (e) => {
+    if (touches.has(e.pointerId)) {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch && touches.size === 2) {
+        setZoom(pinch.z * (pinchDistance() / Math.max(1, pinch.d)));
+        return;
+      }
+    }
     if (e.pointerId === input.joy.id) {
       const dx = e.clientX - input.joy.ox, dy = e.clientY - input.joy.oy;
       const max = 55;
@@ -3191,6 +3237,12 @@
   });
 
   function pointerEnd(e) {
+    touches.delete(e.pointerId);
+    if (pinch) {
+      if (touches.size < 2) pinch = null;
+      if (e.pointerId === input.aimId) input.aimId = null;
+      return;
+    }
     if (e.pointerId === input.joy.id) {
       input.joy.id = null; input.joy.x = 0; input.joy.y = 0;
       $("#joy-base").classList.remove("on");
@@ -3236,6 +3288,8 @@
       return;
     }
     if (e.code === "KeyM" && !e.repeat) { toggleSound(); return; }
+    if (playing && (e.code === "Equal" || e.code === "NumpadAdd")) { setZoom(settings.zoom * 1.2); return; }
+    if (playing && (e.code === "Minus" || e.code === "NumpadSubtract")) { setZoom(settings.zoom / 1.2); return; }
     if (!playing || !playingHere()) return;
     if (GAME_KEYS.has(e.code)) e.preventDefault();
     input.keys[e.code] = true;
@@ -3283,6 +3337,7 @@
     currentScreen = name;
     screens.forEach((s) => $("#screen-" + s).classList.toggle("hidden", s !== name));
     const inGame = name === "game" || name === "pause" || (name === "settings" && screenStack.includes("pause"));
+    document.body.classList.toggle("in-game", name === "game");
     $("#hud").classList.toggle("hidden", !inGame);
     $("#touch").classList.toggle("hidden", name !== "game");
     $("#coach").classList.toggle("hidden", !(name === "game" && G.ctx === "tutorial" && G.mode === "play"));
@@ -4015,6 +4070,8 @@
   $$("[data-back]").forEach((b) => b.addEventListener("click", () => { sfx.click(); goBack(); }));
   $("#btn-start").addEventListener("click", () => beginMatch({ ctx: "quick" }));
   $("#btn-pause").addEventListener("click", () => { sfx.click(); pauseGame(); });
+  $("#btn-zoom-in").addEventListener("click", () => { sfx.tick(); setZoom(settings.zoom * 1.25); });
+  $("#btn-zoom-out").addEventListener("click", () => { sfx.tick(); setZoom(settings.zoom / 1.25); });
   $("#btn-sound").addEventListener("click", toggleSound);
   $("#btn-resume").addEventListener("click", () => { sfx.click(); resumeGame(); });
   $("#btn-restart").addEventListener("click", () => {

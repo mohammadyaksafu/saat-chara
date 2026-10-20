@@ -110,6 +110,7 @@
         <p class="tagline" data-i18n="title.tagline"></p>
         <div class="menu">
           <button class="btn btn-primary" id="btn-play" data-i18n="menu.play">Quick match</button>
+          <button class="btn btn-friend" id="btn-online" data-i18n="menu.online">Play with a friend</button>
           <button class="btn btn-gold" id="btn-tourney" data-i18n="menu.tourney">Village tournament</button>
           <div class="menu-row">
             <button class="btn btn-small" id="btn-howto" data-i18n="menu.howto">How to play</button>
@@ -201,6 +202,89 @@
         <div class="panel-actions">
           <button class="btn btn-ghost" data-back data-i18n="common.back">Back</button>
           <button class="btn btn-primary" id="btn-start" data-i18n="setup.start">Start match</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Online: host lobby -->
+    <section class="screen hidden" id="screen-online">
+      <div class="panel">
+        <h2 data-i18n="on.title">Play with a friend</h2>
+        <p class="panel-lead" data-i18n="on.sub"></p>
+
+        <div id="online-setup">
+          <div class="field-group">
+            <div class="label" data-i18n="on.mode">Mode</div>
+            <div class="mode-picker" role="radiogroup">
+              <button class="mode-card" data-mode="versus" role="radio">
+                <span class="mode-icon" aria-hidden="true">🆚</span>
+                <b data-i18n="on.versus">Friend vs friend</b>
+                <small data-i18n="on.versusD"></small>
+              </button>
+              <button class="mode-card" data-mode="coop" role="radio">
+                <span class="mode-icon" aria-hidden="true">🤝</span>
+                <b data-i18n="on.coop">Together vs computer</b>
+                <small data-i18n="on.coopD"></small>
+              </button>
+            </div>
+          </div>
+          <div class="row-2">
+            <div class="field-group">
+              <div class="label" data-i18n="setup.size">Players per team</div>
+              <div class="seg" data-online="teamSize">
+                <button data-value="3">3</button>
+                <button data-value="4">4</button>
+                <button data-value="5">5</button>
+              </div>
+            </div>
+            <div class="field-group">
+              <div class="label" data-i18n="setup.target">First to</div>
+              <div class="seg" data-online="target">
+                <button data-value="2">2</button>
+                <button data-value="3">3</button>
+                <button data-value="5">5</button>
+              </div>
+            </div>
+          </div>
+          <div class="field-group" id="online-diff">
+            <div class="label" data-i18n="setup.difficulty">Difficulty</div>
+            <div class="seg" data-online="difficulty">
+              <button data-value="easy" data-i18n="diff.easy">Easy</button>
+              <button data-value="normal" data-i18n="diff.normal">Normal</button>
+              <button data-value="hard" data-i18n="diff.hard">Hard</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="online-room" class="room hidden">
+          <div class="label" data-i18n="on.code">Room code</div>
+          <div class="room-code" id="room-code">······</div>
+          <div class="room-link" id="room-link"></div>
+          <div class="room-actions">
+            <button class="btn btn-small" id="btn-copy-link" data-i18n="on.copy">Copy link</button>
+            <button class="btn btn-small btn-gold" id="btn-share-link" data-i18n="on.share">Share link</button>
+          </div>
+        </div>
+
+        <div class="online-status" id="online-status" aria-live="polite"></div>
+
+        <div class="panel-actions">
+          <button class="btn btn-ghost" id="btn-online-back" data-i18n="common.back">Back</button>
+          <button class="btn btn-primary" id="btn-online-go" data-i18n="on.create">Create room</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Online: invited guest -->
+    <section class="screen hidden" id="screen-join">
+      <div class="panel panel-small">
+        <div class="trophy" aria-hidden="true">🎉</div>
+        <h2 data-i18n="on.joinTitle">You're invited!</h2>
+        <p class="panel-lead" id="join-body"></p>
+        <div class="online-status" id="join-status" aria-live="polite"></div>
+        <div class="menu">
+          <button class="btn btn-primary" id="btn-join" data-i18n="on.join">Join game</button>
+          <button class="btn btn-ghost" id="btn-join-cancel" data-i18n="result.menu">Main menu</button>
         </div>
       </div>
     </section>
@@ -309,6 +393,7 @@
     <section class="screen hidden" id="screen-pause">
       <div class="panel panel-small">
         <h2 data-i18n="pause.title">Paused</h2>
+        <p class="panel-lead hidden" id="pause-online" data-i18n="on.livePause"></p>
         <div class="menu">
           <button class="btn btn-primary" id="btn-resume" data-i18n="pause.resume">Resume</button>
           <button class="btn" id="btn-restart" data-i18n="pause.restart">Restart match</button>
@@ -327,6 +412,7 @@
         <p class="result-unlock hidden" id="result-unlock"></p>
         <div class="stats" id="result-stats"></div>
         <div class="result-ach hidden" id="result-ach"></div>
+        <div class="online-status hidden" id="result-wait" data-i18n="on.waitHost"></div>
         <div class="menu">
           <button class="btn btn-primary" id="btn-again"></button>
           <button class="btn btn-gold" id="btn-share" data-i18n="result.share">Share</button>
@@ -344,6 +430,7 @@
   <script src="js/i18n.js"></script>
   <script src="js/counter.js"></script>
   <script src="js/audio.js"></script>
+  <script src="js/net.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>

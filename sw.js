@@ -1,5 +1,5 @@
 /* Saat Chara service worker: lets the game load and play offline after the first visit. */
-const CACHE = "saatchara-v2";
+const CACHE = "saatchara-v3";
 const SHELL = [
   "./",
   "index.html",
@@ -8,6 +8,7 @@ const SHELL = [
   "js/i18n.js",
   "js/counter.js",
   "js/audio.js",
+  "js/net.js",
   "js/game.js",
   "js/stats.js",
   "assets/icon.svg",

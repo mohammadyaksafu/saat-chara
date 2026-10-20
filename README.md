@@ -12,6 +12,7 @@ for gameplay: the field, players, sounds and music are all drawn or generated in
 
 ## Features
 
+- **Play with a friend on two devices:** create a room, send the link (or the 6-letter code), and your friend opens it on their own phone or computer. Choose **Friend vs friend** (you lead opposite teams) or **Together vs computer** (same team against the AI). Computer players fill the remaining spots.
 - **Tutorial:** a one-minute guided round for first-time players (throw, pick up, stack, switch, dodge).
 - **Quick match:** choose a team, difficulty (Easy / Normal / Hard), 3–5 players per team, match length, field and house rules.
 - **Village tournament:** beat five teams in a row to become Upazila champion. Each win unlocks a new field.
@@ -46,6 +47,17 @@ for gameplay: the field, players, sounds and music are all drawn or generated in
 - Defenders can't run while holding the ball, must throw within 3 seconds (house rule), and can't stand in the chalk circle.
 - Stacking all 7 before the timer runs out wins the round. If every attacker is out, or time runs out, the defenders win the round. The teams then swap roles.
 
+## How online play works
+
+- The two browsers connect directly to each other with WebRTC. The free [PeerJS](https://peerjs.com/) public server only introduces them; game data never goes through a game server.
+- The person who creates the room (the host) runs the match and sends what's happening about 20 times a second. The friend's device draws it, moves its own player locally (so movement feels instant) and sends its actions back.
+- The PeerJS library is loaded only when someone opens online play.
+- Rooms are private: only someone with the link or code can join, and a room takes one friend.
+
+Things to know:
+- Both players need to keep the game open in the front. If the host switches apps, phones pause the page and the match freezes for both.
+- Most home Wi-Fi and mobile networks connect fine. Some strict mobile or office networks block direct connections. If a link won't connect, both players can try the same Wi-Fi. A TURN relay server would fix this for every network, and can be added later (for example a free Metered or Cloudflare TURN account).
+
 ## Visitor counter
 
 The game counts visits, unique visitors (one per browser), matches, finished tutorials and
@@ -78,6 +90,7 @@ css/style.css          UI styling (responsive, safe areas, reduced motion)
 js/i18n.js             English and Bengali text
 js/audio.js            Web Audio sound effects, music, ambience and voice shouts
 js/counter.js          anonymous visit counters
+js/net.js              two-device play over WebRTC (PeerJS)
 js/game.js             game loop, physics, AI, camera, rendering, input, menus
 js/stats.js            visitor stats page logic and chart
 sw.js                  offline cache

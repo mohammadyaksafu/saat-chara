@@ -8,6 +8,7 @@
   const t = I18N.t;
   const num = I18N.num;
   const Counter = window.SaatCounter;
+  const Net = window.SaatNet;
 
   // ---------------------------------------------------------------------------
   // World constants (logical units; the camera scales this to the screen)
@@ -32,6 +33,9 @@
   const HAND_Z = 34;
   const HOLD_LIMIT = 3;
   const WIND_ACC = 300;
+  const HUMAN_THROW = { throwSpd: 900, lead: 1, errPx: 7 };
+  const SNAPSHOT_EVERY = 0.05;
+  const INPUT_EVERY = 0.033;
 
   const TEAMS = [
     { id: "tigers", color: "#f08a24", dark: "#a8560c", light: "#ffc27a", pattern: "stripes" },
@@ -103,6 +107,8 @@
   const pick = (arr) => arr[(Math.random() * arr.length) | 0];
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const r1 = (v) => Math.round(v * 10) / 10;
+  const r2 = (v) => Math.round(v * 100) / 100;
   // The chalk circle is drawn squashed for perspective, so measure it the same way.
   const RING_Y = 0.72;
   const ringDist = (p) => Math.hypot(p.x - TOWER.x, (p.y - TOWER.y) / RING_Y);
@@ -110,6 +116,7 @@
   const teamOf = (i) => G.teams[i];
   const teamLabel = (i) => (G.teams[i].label ? t(G.teams[i].label) : t(`team.${G.teams[i].id}.short`));
   const kidName = (k) => k.names[I18N.lang === "bn" ? 1 : 0];
+  const kidIdx = (k) => (k ? G.kids.indexOf(k) : -1);
 
   function shuffle(a) {
     for (let i = a.length - 1; i > 0; i--) {
@@ -139,6 +146,7 @@
   const PROGRESS_DEFAULTS = () => ({
     team: "tigers", difficulty: "normal", teamSize: 3, target: 3, field: "village",
     rules: { order: true, catchOut: true, holdLimit: true, time: 45 },
+    online: { mode: "versus", teamSize: 3, target: 3, difficulty: "normal" },
     wins: 0, losses: 0, tutorialDone: false,
     tourney: { stage: 0, champion: false },
     unlocked: ["village"], ach: {}, totals: { hits: 0, kicks: 0 },
@@ -149,15 +157,15 @@
   function loadSettings() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { saved = {}; }
-    const d = Object.assign({}, PREF_DEFAULTS, PROGRESS_DEFAULTS());
-    const s = Object.assign(d, saved);
+    const s = Object.assign({}, PREF_DEFAULTS, PROGRESS_DEFAULTS(), saved);
     s.rules = Object.assign(PROGRESS_DEFAULTS().rules, saved.rules || {});
+    s.online = Object.assign(PROGRESS_DEFAULTS().online, saved.online || {});
     s.tourney = Object.assign(PROGRESS_DEFAULTS().tourney, saved.tourney || {});
     s.totals = Object.assign(PROGRESS_DEFAULTS().totals, saved.totals || {});
     s.ach = Object.assign({}, saved.ach || {});
     if (!Array.isArray(s.unlocked) || !s.unlocked.includes("village")) s.unlocked = ["village"];
     // Players from the first version already know the game.
-    if (saved.wins || saved.losses) s.tutorialDone = s.tutorialDone || true;
+    if (saved.wins || saved.losses) s.tutorialDone = true;
     return s;
   }
   function saveSettings() {
@@ -169,7 +177,9 @@
   // ---------------------------------------------------------------------------
   const G = {
     mode: "attract",          // attract | play
-    ctx: "quick",             // quick | tourney | tutorial
+    ctx: "quick",             // quick | tourney | tutorial | online
+    net: null,                // null | host | guest
+    online: null,             // { mode: versus | coop }
     stage: 0,
     phase: "intro",           // intro | throw | rebuild | roundEnd | matchEnd
     phaseT: 0,
@@ -179,8 +189,10 @@
     diff: "normal",
     field: "village",
     rules: PROGRESS_DEFAULTS().rules,
+    ctls: [],                 // human controllers in this match
+    localCtl: null,           // the controller for this device
+    human: null,              // the kid this device controls (localCtl.kid)
     humanTeam: -1,
-    human: null,
     kids: [],
     stones: [],
     ball: null,
@@ -194,16 +206,15 @@
     throwIdx: 0,
     throwState: "aim",        // aim | flying | wait
     throwPos: { x: THROW_X, y: TOWER.y },
+    snapThrower: -1,
     waitT: 0,
     flyT: 0,
     aiAimT: 0,
-    aimAngle: 0,
-    charge: { active: false, p: 0, dir: 1 },
     sweet: DIFF.normal.sweet,
     meter: 1.25,
     aimHelp: false,
     wind: 0,
-    perfectThrow: false,
+    perfectBy: null,
     rebuildT: 45,
     placed: 0,
     towerUp: true,
@@ -212,14 +223,28 @@
     lastWinner: -1,
     stats: null,
     newAch: [],
-    lockTarget: null,
-    switchFlash: 0,
-    tut: null,                // tutorial progress
+    tut: null,
+    snap: null,               // guest: latest host snapshot
+    snapAt: 0,
   };
 
   function newStats() {
     return { placed: 0, hits: 0, knocks: 0, kicks: 0, catches: 0 };
   }
+
+  function makeCtl(id, team, local) {
+    return {
+      id, team, local, kid: null,
+      charge: { active: false, p: 0, dir: 1 },
+      aimAngle: 0, lockTarget: null, switchFlash: 0,
+      stats: newStats(),
+      net: null,              // host: latest movement report from the friend's device
+    };
+  }
+
+  const ctlById = (id) => G.ctls.find((c) => c.id === id) || null;
+  const teamHasCtl = (tm) => G.ctls.some((c) => c.team === tm);
+  const localTeam = () => (G.localCtl ? G.localCtl.team : -1);
 
   function makeStones() {
     G.stones = STONE_W.map((w, i) => {
@@ -238,25 +263,25 @@
     };
   }
 
-  function makeKid(team, idx, isHuman, names) {
+  function makeKid(team, idx, names, look) {
+    const l = look || { skin: pick(SKINS), hair: pick(HAIRS), hairStyle: (Math.random() * 3) | 0 };
     return {
-      team, idx, isHuman, names,
+      team, idx, names, isHuman: false, ctl: null,
       x: 0, y: 0, vx: 0, vy: 0, fx: 1, fy: 0, anim: Math.random() * 6,
       alive: true, bench: null, carrying: null, hasBall: false,
       placeT: 0, dashT: 0, dashCD: 0, holdT: 0, hitFlash: 0, cheer: 0, throwAnim: 0,
-      skin: pick(SKINS), hair: pick(HAIRS), hairStyle: (Math.random() * 3) | 0,
+      skin: l.skin, hair: l.hair, hairStyle: l.hairStyle,
       home: { x: 0, y: 0 },
       ai: { stone: null, dodgeId: -1, willDodge: false, dodgeT: 0, dodgeDelay: 0, receiving: false, react: 0.5, wobble: Math.random() * 6.28, brave: rand(0.3, 1) },
     };
   }
 
-  function buildKids(size, humanTeam) {
+  function buildKids(size) {
     const names = shuffle(NAMES.slice());
     G.kids = [];
     for (let tm = 0; tm < 2; tm++) {
-      for (let i = 0; i < size; i++) G.kids.push(makeKid(tm, i, tm === humanTeam && i === 0, names.pop()));
+      for (let i = 0; i < size; i++) G.kids.push(makeKid(tm, i, names.pop()));
     }
-    G.human = G.kids.find((k) => k.isHuman) || null;
   }
 
   const teamKids = (tm) => G.kids.filter((k) => k.team === tm);
@@ -264,8 +289,20 @@
   const isAttacker = (k) => k.team === G.attacking;
 
   function params(k) {
-    if (G.humanTeam < 0) return DIFF.normal;
-    return k.team === G.humanTeam ? MATE : DIFF[G.diff] || DIFF.normal;
+    if (G.mode !== "play") return DIFF.normal;
+    if (G.online && G.online.mode === "versus") return MATE;
+    return teamHasCtl(k.team) ? MATE : DIFF[G.diff] || DIFF.normal;
+  }
+
+  // Bind a controller straight to a kid (used when a match is built).
+  function bindCtl(ctl, k) {
+    ctl.kid = k;
+    if (k) { k.ctl = ctl; k.isHuman = true; }
+    syncHuman();
+  }
+
+  function syncHuman() {
+    G.human = G.localCtl ? G.localCtl.kid : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -275,11 +312,12 @@
     return Object.assign({}, TEAMS.find((x) => x.id === id) || TEAMS[0], { label: label || null });
   }
 
-  // opts: { ctx: quick|tourney|tutorial, stage }
+  // opts: { ctx: quick|tourney|tutorial|online, stage, mode: versus|coop }
   function startMatch(opts) {
     const o = opts || {};
     G.ctx = o.ctx || "quick";
     G.stage = o.stage || 0;
+    G.online = G.ctx === "online" ? { mode: o.mode || "versus" } : null;
     const mine = teamFor(settings.team);
     let size, target, diff, field, rival;
     if (G.ctx === "tourney") {
@@ -291,6 +329,12 @@
       rival = teamFor(RIVAL[mine.id]);
       size = 3; target = 1; diff = "easy"; field = "village";
       G.rules = { order: true, catchOut: false, holdLimit: false, time: 60 };
+    } else if (G.ctx === "online") {
+      rival = teamFor(RIVAL[mine.id]);
+      size = settings.online.teamSize; target = settings.online.target;
+      diff = G.online.mode === "coop" ? settings.online.difficulty : "normal";
+      field = settings.unlocked.includes(settings.field) ? settings.field : "village";
+      G.rules = Object.assign({}, settings.rules);
     } else {
       rival = teamFor(RIVAL[mine.id]);
       size = settings.teamSize; target = settings.target; diff = settings.difficulty;
@@ -299,36 +343,57 @@
     }
     const D = DIFF[diff];
     G.mode = "play";
+    G.net = G.ctx === "online" ? "host" : null;
     G.teams = [mine, rival];
     G.diff = diff;
     G.sweet = D.sweet;
     G.meter = D.meter;
     G.aimHelp = D.aimHelp || G.ctx === "tutorial";
-    G.humanTeam = 0;
     G.target = target;
     G.scores = [0, 0];
     G.round = 0;
-    G.stats = newStats();
     G.newAch = [];
     G.attacking = G.ctx === "tutorial" ? 0 : Math.random() < 0.5 ? 0 : 1;
     G.tut = G.ctx === "tutorial" ? { step: 0, t: 0, switched: false, dashed: false } : null;
     G.particles.length = 0;
     G.floaters.length = 0;
+    netEvents.length = 0;
     setField(field);
-    buildKids(size, 0);
+    buildKids(size);
+
+    // Humans: this device leads team 0; an online friend leads team 1 (versus) or
+    // plays alongside on team 0 (together vs computer).
+    const host = makeCtl("h", 0, true);
+    G.ctls = [host];
+    G.localCtl = host;
+    bindCtl(host, teamKids(0)[0]);
+    if (G.ctx === "online") {
+      const coop = G.online.mode === "coop";
+      const guest = makeCtl("g", coop ? 0 : 1, false);
+      G.ctls.push(guest);
+      bindCtl(guest, coop ? teamKids(0)[1] : teamKids(1)[0]);
+    }
+    G.humanTeam = host.team;
+    G.stats = host.stats;
+
     makeStones();
     makeBall();
     setupRound();
     hudReset();
     cam.snap = true;
-    if (G.ctx !== "tutorial") Counter.hit("matches");
+    if (G.ctx !== "tutorial") Counter.hit(G.ctx === "online" ? "online-matches" : "matches");
   }
 
   function startAttract() {
     G.mode = "attract";
     G.ctx = "quick";
+    G.net = null;
+    G.online = null;
     const tm = shuffle(TEAMS.slice());
     G.teams = [teamFor(tm[0].id), teamFor(tm[1].id)];
+    G.ctls = [];
+    G.localCtl = null;
+    G.human = null;
     G.humanTeam = -1;
     G.diff = "normal";
     G.rules = { order: true, catchOut: true, holdLimit: true, time: 45 };
@@ -338,10 +403,11 @@
     G.stats = newStats();
     G.attacking = 0;
     G.tut = null;
+    G.snap = null;
     G.particles.length = 0;
     G.floaters.length = 0;
     setField("village");
-    buildKids(4, -1);
+    buildKids(4);
     makeStones();
     makeBall();
     setupRound();
@@ -368,8 +434,8 @@
     G.placed = STONE_W.length;
     G.towerUp = true;
     G.rebuildT = G.rules.time;
-    G.charge.active = false;
     G.slowmo = 0;
+    G.ctls.forEach((c) => { c.charge.active = false; c.lockTarget = null; });
     G.stones.forEach((s) => {
       s.placed = true; s.staged = false; s.carriedBy = null;
       s.x = TOWER.x; s.y = TOWER.y; s.z = 0; s.vx = s.vy = s.vz = 0;
@@ -388,7 +454,8 @@
       k.ai.stone = null; k.ai.receiving = false; k.ai.dodgeId = -1;
     });
 
-    attackers.sort((a, b) => (b.isHuman ? 1 : 0) - (a.isHuman ? 1 : 0));
+    // Humans throw first.
+    attackers.sort((a, b) => (a.ctl ? 0 : 1) - (b.ctl ? 0 : 1));
     attackers.forEach((k, i) => {
       k.home = queueSpot(i);
       const p = i === 0 ? G.throwPos : k.home;
@@ -403,16 +470,12 @@
     G.throwIdx = 0;
     G.throwState = "aim";
     G.aiAimT = 0;
-    G.aimAngle = Math.atan2(TOWER.y - G.throwPos.y, TOWER.x - G.throwPos.x);
+    G.ctls.forEach((c) => { c.aimAngle = Math.atan2(TOWER.y - G.throwPos.y, TOWER.x - G.throwPos.x); });
     giveBall(G.throwOrder[0]);
-    G.lockTarget = null;
-    if (att === G.humanTeam) setControlled(G.throwOrder[0]);
+    assignThrower();
 
     setPhase("intro");
-    if (G.mode === "play" && !tutorial) {
-      const youAttack = att === G.humanTeam;
-      showBanner(t("phase.round", { n: G.round }), youAttack ? t("b.roundAtt") : t("b.roundDef", { team: teamLabel(att) }), teamOf(att).dark, 1.7);
-    }
+    if (G.mode === "play" && !tutorial) fx({ e: "round" });
   }
 
   function setPhase(p) {
@@ -429,16 +492,23 @@
   }
 
   function currentThrower() {
+    if (G.net === "guest") return G.kids[G.snapThrower] || null;
     return G.throwOrder[G.throwIdx];
+  }
+
+  // Humans on the attacking team take the throws, taking turns when two share a team.
+  function assignThrower() {
+    const ctls = G.ctls.filter((c) => c.team === G.attacking);
+    if (!ctls.length) return;
+    setControlled(ctls[G.throwIdx % ctls.length], currentThrower());
   }
 
   function advanceThrow() {
     if (G.ctx === "tutorial") {
       // In the tutorial the player keeps throwing until the tower falls.
       G.throwState = "aim";
-      G.charge.active = false;
       giveBall(currentThrower());
-      setControlled(currentThrower());
+      assignThrower();
       return;
     }
     G.throwIdx++;
@@ -450,36 +520,19 @@
     }
     G.throwState = "aim";
     G.aiAimT = 0;
-    G.charge.active = false;
+    G.ctls.forEach((c) => { c.charge.active = false; });
     giveBall(currentThrower());
-    if (G.attacking === G.humanTeam) setControlled(currentThrower());
+    assignThrower();
   }
 
   function roundEnd(winner, reason) {
     if (G.phase === "roundEnd" || G.phase === "matchEnd") return;
     setPhase("roundEnd");
     G.lastWinner = winner;
-    G.charge.active = false;
+    G.ctls.forEach((c) => { c.charge.active = false; });
     if (winner >= 0) G.scores[winner]++;
     G.kids.forEach((k) => { if (k.team === winner) k.cheer = 2.2; });
-
-    if (G.mode !== "play") return;
-    const youWon = winner === G.humanTeam;
-    const who = winner >= 0 ? (youWon ? t("yourTeam") : teamLabel(winner)) : "";
-    const shade = winner >= 0 ? teamOf(winner).dark : "#5c4a3a";
-    if (reason === "rebuilt") {
-      showBanner("সাত চাড়া!", t("b.rebuilt", { team: who }), shade, 2.6, true);
-      Sound.shout("সাত চাড়া!", "bn-BD", "Saat Chara!");
-      if (youWon) unlock("saat_chara");
-    } else if (reason === "allout") {
-      showBanner(t("b.allout"), t("b.alloutSub", { team: who }), shade, 2.6);
-    } else if (reason === "time") {
-      showBanner(t("b.time"), t("b.timeSub", { team: who }), shade, 2.6);
-    } else {
-      showBanner(t("b.stands"), t("b.standsSub"), shade, 2.4);
-    }
-    if (youWon) sfx.cheer(); else sfx.groan();
-    bumpScore(winner);
+    if (G.mode === "play") fx({ e: "roundEnd", w: winner, r: reason });
   }
 
   function nextRoundOrEnd() {
@@ -496,12 +549,12 @@
   function matchEnd(winner) {
     setPhase("matchEnd");
     G.kids.forEach((k) => { k.cheer = k.team === winner ? 99 : 0; });
-    const won = winner === G.humanTeam;
+    const won = winner === localTeam();
     let unlocked = null;
     if (won) {
       settings.wins++;
       unlock("first_win");
-      if (G.diff === "hard") unlock("tough");
+      if (G.diff === "hard" && !(G.online && G.online.mode === "versus")) unlock("tough");
       if (G.ctx === "tourney" && G.stage === settings.tourney.stage) {
         const op = TOURNEY[G.stage];
         if (op.unlock && !settings.unlocked.includes(op.unlock)) {
@@ -519,6 +572,8 @@
       settings.losses++;
     }
     saveSettings();
+    const guest = ctlById("g");
+    if (G.net === "host" && guest) fx({ e: "matchEnd", w: winner, st: guest.stats, to: "g" });
     if (won) { sfx.win(); confettiBurst(W / 2, H / 2 - 100, 140); }
     clearTimeout(resultTimer);
     resultTimer = setTimeout(() => showResult(won, unlocked), 1300);
@@ -537,7 +592,86 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Progress: achievements
+  // Effects and presentation. Everything players see or hear goes through fx(),
+  // so the host can replay it on the friend's device.
+  // ---------------------------------------------------------------------------
+  const netEvents = [];
+
+  function fx(ev) {
+    applyFx(ev);
+    if (G.net === "host") netEvents.push(ev);
+  }
+
+  function applyFx(ev) {
+    if (ev.to && (!G.localCtl || ev.to !== G.localCtl.id)) return;
+    switch (ev.e) {
+      case "sfx": if (G.mode === "play" && sfx[ev.n]) sfx[ev.n](ev.a); break;
+      case "fl": G.floaters.push({ x: ev.x, y: ev.y, key: ev.k, vars: ev.v, text: ev.r, color: ev.c, life: 0, max: ev.l || 1 }); break;
+      case "dust": dust(ev.x, ev.y, ev.n, ev.c); break;
+      case "spark": sparkle(ev.x, ev.y, ev.n); break;
+      case "conf": confettiBurst(ev.x, ev.y, ev.n); break;
+      case "shake": if (settings.shake && !reduceMotion) G.shake = Math.max(G.shake, ev.v); break;
+      case "round": presentRound(); break;
+      case "knock": presentKnock(); break;
+      case "roundEnd": presentRoundEnd(ev.w, ev.r); break;
+      case "caught": presentCaught(ev.thr, ev.team); break;
+      case "ach": unlock(ev.id); break;
+      case "tot": addTotal(ev.k); break;
+      case "matchEnd": if (G.net === "guest") guestMatchEnd(ev); break;
+      default: break;
+    }
+  }
+
+  const sound = (n, a) => { if (G.mode === "play") fx({ e: "sfx", n, a }); };
+  const floater = (x, y, key, color, life, vars) => fx({ e: "fl", x: r1(x), y: r1(y), k: key, v: vars, c: color, l: life });
+  const floaterRaw = (x, y, text, color, life) => fx({ e: "fl", x: r1(x), y: r1(y), r: text, c: color, l: life });
+  const shakeScreen = (v) => fx({ e: "shake", v });
+  const fxDust = (x, y, n, c) => fx({ e: "dust", x: r1(x), y: r1(y), n, c });
+  const fxSpark = (x, y, n) => fx({ e: "spark", x, y, n });
+  const fxConfetti = (x, y, n) => fx({ e: "conf", x, y, n });
+
+  function presentRound() {
+    if (G.mode !== "play" || G.ctx === "tutorial") return;
+    const att = G.attacking;
+    const youAttack = att === localTeam();
+    showBanner(t("phase.round", { n: G.round }), youAttack ? t("b.roundAtt") : t("b.roundDef", { team: teamLabel(att) }), teamOf(att).dark, 1.7);
+  }
+
+  function presentKnock() {
+    if (G.mode !== "play") return;
+    sfx.whistle();
+    if (G.ctx === "tutorial") return;
+    const youAttack = G.attacking === localTeam();
+    showBanner(t("b.down"), youAttack ? t("b.downAtt") : t("b.downDef"), teamOf(G.attacking).dark, 1.4);
+  }
+
+  function presentRoundEnd(winner, reason) {
+    const youWon = winner === localTeam();
+    const who = winner >= 0 ? (youWon ? t("yourTeam") : teamLabel(winner)) : "";
+    const shade = winner >= 0 ? teamOf(winner).dark : "#5c4a3a";
+    if (reason === "rebuilt") {
+      showBanner("সাত চাড়া!", t("b.rebuilt", { team: who }), shade, 2.6, true);
+      Sound.shout("সাত চাড়া!", "bn-BD", "Saat Chara!");
+      if (youWon) unlock("saat_chara");
+    } else if (reason === "allout") {
+      showBanner(t("b.allout"), t("b.alloutSub", { team: who }), shade, 2.6);
+    } else if (reason === "time") {
+      showBanner(t("b.time"), t("b.timeSub", { team: who }), shade, 2.6);
+    } else {
+      showBanner(t("b.stands"), t("b.standsSub"), shade, 2.4);
+    }
+    if (youWon) sfx.cheer(); else sfx.groan();
+    bumpScore(winner);
+  }
+
+  function presentCaught(thrIdx, team) {
+    const thrower = G.kids[thrIdx];
+    if (!thrower) return;
+    showBanner(t("b.caught"), thrower === G.human ? t("b.youOut") : t("b.caughtSub", { name: kidName(thrower) }), teamOf(team).dark, 1.2);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Progress: achievements (always for this device's player)
   // ---------------------------------------------------------------------------
   function unlock(id) {
     if (G.mode !== "play" || settings.ach[id]) return;
@@ -547,11 +681,23 @@
     showToast(t("ach." + id));
   }
 
+  function unlockFor(ctl, id) {
+    if (!ctl) return;
+    if (ctl.local) unlock(id);
+    else fx({ e: "ach", id, to: ctl.id });
+  }
+
   function addTotal(key) {
     settings.totals[key] = (settings.totals[key] || 0) + 1;
     if (key === "hits" && settings.totals.hits >= 10) unlock("sniper");
     if (key === "kicks" && settings.totals.kicks >= 10) unlock("kicker");
     saveSettings();
+  }
+
+  function addTotalFor(ctl, key) {
+    if (!ctl) return;
+    if (ctl.local) addTotal(key);
+    else fx({ e: "tot", k: key, to: ctl.id });
   }
 
   // ---------------------------------------------------------------------------
@@ -570,7 +716,7 @@
     b.live = live; b.thrower = k; b.throwTeam = k.team; b.bounced = 0; b.fromThrow = false;
     b.ignore = k; b.ignoreT = 0.25; b.throwId++; b.passTo = null; b.targetKid = null;
     k.holdT = 0; k.throwAnim = 0.3; k.fx = dx / d; k.fy = dy / d;
-    play(sfx.throw);
+    sound("throw");
   }
 
   function throwAtTower(k, power, angle) {
@@ -585,19 +731,17 @@
     k.throwAnim = 0.35; k.fx = Math.cos(angle); k.fy = Math.sin(angle);
     G.throwState = "flying";
     G.flyT = 0;
-    play(sfx.throw);
+    sound("throw");
   }
 
-  function humanReleaseThrow() {
-    const k = G.human;
-    const p = G.charge.p;
-    G.charge.active = false;
+  function releaseThrow(ctl, p, angle) {
+    const k = ctl.kid;
     const [lo, hi] = G.sweet;
     const zoneDist = p < lo ? lo - p : p > hi ? p - hi : 0;
     const jitter = (Math.random() * 2 - 1) * Math.min(0.2, 0.022 + zoneDist * 0.45);
-    G.perfectThrow = zoneDist === 0;
-    if (G.perfectThrow) floater(k.x, k.y - 80, t("f.perfect"), "#fff3b0", 0.9);
-    throwAtTower(k, p, G.aimAngle + jitter);
+    G.perfectBy = zoneDist === 0 ? ctl : null;
+    if (zoneDist === 0) floater(k.x, k.y - 80, "f.perfect", "#fff3b0", 0.9);
+    throwAtTower(k, p, angle + jitter);
   }
 
   function aiThrowTower(k) {
@@ -607,7 +751,7 @@
     const ft = d / (380 + 820 * p);
     const drift = 0.5 * WIND_ACC * G.wind * ft * ft;
     const ang = Math.atan2(TOWER.y - k.y, TOWER.x - k.x) - (drift / d) * rand(0.6, 1.1) + gauss() * P.aimErr * 0.55;
-    G.perfectThrow = false;
+    G.perfectBy = null;
     throwAtTower(k, p, ang);
   }
 
@@ -628,22 +772,21 @@
     b.vz = Math.max(b.vz, 180);
     shakeScreen(14);
     G.slowmo = 0.45;
-    dust(TOWER.x, TOWER.y, 26, "#c9a36b");
-    play(sfx.crash);
+    fxDust(TOWER.x, TOWER.y, 26, "#c9a36b");
+    sound("crash");
     if (G.mode === "play") {
       const k = b.thrower;
-      if (k && k.isHuman) {
-        G.stats.knocks++;
-        if (G.perfectThrow) unlock("perfect");
+      if (k && k.ctl) {
+        k.ctl.stats.knocks++;
+        if (G.perfectBy === k.ctl) unlockFor(k.ctl, "perfect");
       }
       if (G.ctx === "tutorial") {
         G.tut.step = 1;
         G.rebuildT = G.rules.time;
-      } else {
-        const youAttack = G.attacking === G.humanTeam;
-        showBanner(t("b.down"), youAttack ? t("b.downAtt") : t("b.downDef"), teamOf(G.attacking).dark, 1.4);
       }
-      sfx.whistle();
+      fx({ e: "knock" });
+      // A player whose kid was caught out moves to a teammate who is still in.
+      G.ctls.forEach((c) => { if (!c.kid || !c.kid.alive) moveCtlToNearest(c); });
     }
     setPhase("rebuild");
   }
@@ -661,21 +804,29 @@
     const slot = G.kids.filter((x) => x.team === k.team && x.bench).length;
     const left = k.team === 0;
     k.bench = { x: left ? 140 + slot * 44 : W - 140 - slot * 44, y: 864 };
-    floater(k.x, k.y - 70, how === "caught" ? t("f.caught") : t("f.out"), "#ffd2c2", 1.2);
-    play(sfx.out);
-    if (G.mode === "play" && k.isHuman && G.phase === "rebuild") {
-      const next = aliveOf(k.team).sort((a, c) => dist(a, k) - dist(c, k))[0];
-      if (next) setControlled(next);
-    }
+    floater(k.x, k.y - 70, how === "caught" ? "f.caught" : "f.out", "#ffd2c2", 1.2);
+    sound("out");
+    if (G.mode === "play" && k.ctl && G.phase === "rebuild") moveCtlToNearest(k.ctl);
     if (G.phase === "rebuild" && aliveOf(G.attacking).length === 0) roundEnd(1 - G.attacking, "allout");
+  }
+
+  function moveCtlToNearest(ctl) {
+    const from = ctl.kid || TOWER;
+    const next = aliveOf(ctl.team).filter((x) => !x.ctl).sort((a, c) => dist(a, from) - dist(c, from))[0];
+    if (next) setControlled(ctl, next);
   }
 
   function defenderTakeBall(k) {
     giveBall(k);
     k.ai.react = params(k).react * rand(0.7, 1.3);
     G.kids.forEach((x) => { x.ai.receiving = false; });
-    if (G.mode === "play" && k.team === G.humanTeam) setControlled(k);
-    play(sfx.catch);
+    // Control jumps to whoever grabs the ball.
+    if (G.mode === "play" && !k.ctl) {
+      const ctls = G.ctls.filter((c) => c.team === k.team);
+      const ctl = ctls.sort((a, c) => (a.kid ? dist(a.kid, k) : 1e9) - (c.kid ? dist(c.kid, k) : 1e9))[0];
+      if (ctl) setControlled(ctl, k);
+    }
+    sound("catch");
   }
 
   // A defender who holds the ball too long has to let it go.
@@ -687,15 +838,14 @@
     b.vx = k.fx * 90; b.vy = k.fy * 60; b.vz = 60;
     b.live = false; b.fromThrow = false; b.ignore = k; b.ignoreT = 0.6;
     k.holdT = 0;
-    floater(k.x, k.y - 70, t("f.slow"), "#ffd2c2", 1);
-    play(sfx.groan);
+    floater(k.x, k.y - 70, "f.slow", "#ffd2c2", 1);
+    sound("groan");
   }
 
   // --- Stacking order --------------------------------------------------------
   const orderOn = () => G.rules.order;
   const isNextStone = (s) => !orderOn() || s.i === G.placed;
   const pileNext = () => (orderOn() ? G.stones.find((s) => s.staged && s.i === G.placed) : null);
-  const nextGroundStone = () => G.stones.find((s) => !s.placed && s.i === G.placed);
 
   function stageStone(k, s) {
     k.carrying = null; k.placeT = 0;
@@ -704,8 +854,8 @@
     const a = -Math.PI / 2 + n * 1.05 + 0.5;
     s.x = TOWER.x + Math.cos(a) * 46; s.y = TOWER.y + Math.sin(a) * 46 * RING_Y;
     s.z = 0; s.vx = s.vy = s.vz = 0;
-    if (k.isHuman) floater(k.x, k.y - 80, t("f.order"), "#fff3b0", 1);
-    play(() => sfx.clack());
+    if (k.ctl) floater(k.x, k.y - 80, "f.order", "#fff3b0", 1);
+    sound("clack");
   }
 
   function placeStone(k, s) {
@@ -714,21 +864,21 @@
     s.x = TOWER.x; s.y = TOWER.y; s.z = 0; s.vx = s.vy = s.vz = 0;
     k.placeT = 0;
     G.placed++;
-    if (k.isHuman) G.stats.placed++;
-    play(() => sfx.place(G.placed));
-    sparkle(TOWER.x, TOWER.y - G.placed * STONE_T, 10);
-    floater(TOWER.x, TOWER.y - TOWER_H - 30, `${num(G.placed)}/${num(7)}`, "#fff3b0", 0.8);
+    if (k.ctl) k.ctl.stats.placed++;
+    sound("place", G.placed);
+    fxSpark(TOWER.x, TOWER.y - G.placed * STONE_T, 10);
+    floaterRaw(TOWER.x, TOWER.y - TOWER_H - 30, `${G.placed}/7`, "#fff3b0", 0.8);
     if (G.placed >= STONE_W.length) {
-      if (k.isHuman) unlock("last_stone");
+      if (k.ctl) unlockFor(k.ctl, "last_stone");
       G.towerUp = true;
       G.slowmo = 0.6;
-      confettiBurst(TOWER.x, TOWER.y - 60, 90);
+      fxConfetti(TOWER.x, TOWER.y - 60, 90);
       roundEnd(G.attacking, "rebuilt");
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Update
+  // Update (host and single player)
   // ---------------------------------------------------------------------------
   function update(dt) {
     G.time += dt;
@@ -738,7 +888,7 @@
       updateKidsIdle(dt);
       if (G.phaseT > (G.mode === "play" && G.ctx !== "tutorial" ? 1.9 : 0.8)) {
         setPhase("throw");
-        if (G.mode === "play") sfx.whistle();
+        sound("whistle");
       }
     } else if (G.phase === "throw") {
       updateThrowPhase(dt);
@@ -762,8 +912,9 @@
       if (k.cheer > 0) k.cheer = Math.max(0, k.cheer - dt);
     });
     G.shake = Math.max(0, G.shake - dt * 40);
-    G.switchFlash = Math.max(0, G.switchFlash - dt);
-    updateLock();
+    G.ctls.forEach((c) => { c.switchFlash = Math.max(0, c.switchFlash - dt); });
+    updateLocalAim(dt);
+    updateLock(G.localCtl);
     updateTutorial(dt);
   }
 
@@ -786,7 +937,7 @@
         const spot = k === thrower && G.throwState === "aim" ? G.throwPos : k.home;
         steer(k, spot, dt, 0.7);
         if (dist(k, spot) < 4) { k.fx = 1; k.fy = 0; }
-      } else if (k.isHuman) {
+      } else if (k.ctl) {
         humanMove(k, dt, !k.hasBall);
         keepOutOfCircle(k);
       } else {
@@ -797,21 +948,7 @@
 
     if (G.throwState === "aim") {
       if (!thrower || !thrower.alive) { advanceThrow(); return; }
-      const ready = dist(thrower, G.throwPos) < 8;
-      if (thrower.isHuman) {
-        if (G.charge.active) {
-          G.charge.p += G.charge.dir * dt * G.meter;
-          if (G.charge.p >= 1) { G.charge.p = 1; G.charge.dir = -1; }
-          if (G.charge.p <= 0) { G.charge.p = 0; G.charge.dir = 1; }
-        }
-        const base = Math.atan2(TOWER.y - thrower.y, TOWER.x - thrower.x);
-        if (input.usingKeysAim) {
-          const a = (input.keys.ArrowUp || input.keys.KeyW ? -1 : 0) + (input.keys.ArrowDown || input.keys.KeyS ? 1 : 0);
-          G.aimAngle = clamp(G.aimAngle + a * dt * 0.5, base - 0.8, base + 0.8);
-        } else if (input.pointer.valid) {
-          G.aimAngle = clamp(Math.atan2(input.pointer.y - thrower.y, input.pointer.x - thrower.x), -1.2, 1.2);
-        }
-      } else if (ready) {
+      if (!thrower.ctl && dist(thrower, G.throwPos) < 8) {
         G.aiAimT += dt;
         if (G.aiAimT > 1.05) aiThrowTower(thrower);
       }
@@ -819,13 +956,32 @@
       G.flyT += dt;
       const speed = Math.hypot(b.vx, b.vy);
       if (b.holder || (speed < 25 && b.z <= 0.5) || G.flyT > 3.5) {
-        if (!b.holder) floater(b.x, b.y - 40, t("f.miss"), "#ffffff", 0.9);
+        if (!b.holder) floater(b.x, b.y - 40, "f.miss", "#ffffff", 0.9);
         G.throwState = "wait";
         G.waitT = b.holder ? 1.3 : 0.7;
       }
     } else if (G.throwState === "wait") {
       G.waitT -= dt;
       if (G.waitT <= 0) advanceThrow();
+    }
+  }
+
+  // The local player's power meter and aim (runs on whichever device is local).
+  function updateLocalAim(dt) {
+    const ctl = G.localCtl;
+    if (!ctl || !isThrowing(ctl)) return;
+    const k = ctl.kid;
+    if (ctl.charge.active) {
+      ctl.charge.p += ctl.charge.dir * dt * G.meter;
+      if (ctl.charge.p >= 1) { ctl.charge.p = 1; ctl.charge.dir = -1; }
+      if (ctl.charge.p <= 0) { ctl.charge.p = 0; ctl.charge.dir = 1; }
+    }
+    const base = Math.atan2(TOWER.y - k.y, TOWER.x - k.x);
+    if (input.usingKeysAim) {
+      const a = (input.keys.ArrowUp || input.keys.KeyW ? -1 : 0) + (input.keys.ArrowDown || input.keys.KeyS ? 1 : 0);
+      ctl.aimAngle = clamp(ctl.aimAngle + a * dt * 0.5, base - 0.8, base + 0.8);
+    } else if (input.pointer.valid) {
+      ctl.aimAngle = clamp(Math.atan2(input.pointer.y - k.y, input.pointer.x - k.x), -1.2, 1.2);
     }
   }
 
@@ -855,13 +1011,13 @@
 
   function updateRebuild(dt) {
     if (!(G.ctx === "tutorial" && G.tut.step < 5)) G.rebuildT -= dt;
-    if (G.mode === "play" && G.rebuildT < 10 && Math.ceil(G.rebuildT) !== Math.ceil(G.rebuildT + dt)) sfx.tick();
+    if (G.rebuildT < 10 && Math.ceil(G.rebuildT) !== Math.ceil(G.rebuildT + dt)) sound("tick");
     if (G.rebuildT <= 0) { G.rebuildT = 0; roundEnd(1 - G.attacking, "time"); return; }
 
     const frozen = tutorialFrozen();
     G.kids.forEach((k) => {
       if (!k.alive) { if (k.bench) steer(k, k.bench, dt, 0.8); return; }
-      if (k.isHuman) {
+      if (k.ctl) {
         humanMove(k, dt, !k.hasBall);
         if (k.hasBall) {
           k.holdT += dt;
@@ -887,7 +1043,7 @@
           if (s.placed || s.staged || s.carriedBy || s.z > 6) continue;
           if (Math.hypot(s.x - k.x, s.y - k.y) < 24) {
             s.carriedBy = k; k.carrying = s; k.ai.stone = null;
-            play(sfx.pickup);
+            sound("pickup");
             break;
           }
         }
@@ -1009,72 +1165,89 @@
   }
 
   function dash(k) {
-    if (k.dashCD > 0 || !k.alive) return;
+    if (!k || k.dashCD > 0 || !k.alive) return;
     k.dashT = 0.2;
     k.dashCD = 1.1;
-    dust(k.x, k.y, 6, "#d9c08f");
-    if (k.isHuman) {
-      play(sfx.dash);
-      if (G.tut && G.tut.step === 4) G.tut.dashed = true;
+    fxDust(k.x, k.y, 6, "#d9c08f");
+    if (k.ctl) {
+      if (G.mode === "play") fx({ e: "sfx", n: "dash", to: k.ctl.id });
+      if (G.tut && G.tut.step === 4 && k.ctl.local) G.tut.dashed = true;
     }
   }
 
-  // --- Player control: switching and target lock -----------------------------
-  function setControlled(k) {
-    if (!k || k === G.human || G.mode !== "play" || k.team !== G.humanTeam) return;
-    const prev = G.human;
-    if (prev) { prev.isHuman = false; prev.ai.stone = null; prev.ai.receiving = false; }
-    k.isHuman = true;
-    k.ai.stone = null;
-    k.ai.receiving = false;
-    G.human = k;
-    G.charge.active = false;
-    G.lockTarget = null;
-    G.switchFlash = 0.45;
+  // Can this kid move freely right now (rather than walking to a set spot)?
+  function freeMove(k) {
+    if (!k || !k.alive || k.hasBall) return false;
+    if (G.phase === "rebuild") return true;
+    return G.phase === "throw" && !isAttacker(k);
   }
 
-  function canSwitch() {
-    if (G.mode !== "play" || G.paused || !G.human) return false;
-    if (G.ctx === "tutorial" && G.tut.step < 3) return false;
-    if (G.phase === "rebuild") return aliveOf(G.humanTeam).length > 1;
-    return G.phase === "throw" && G.attacking !== G.humanTeam;
+  // --- Player control: switching and target lock -----------------------------
+  function setControlled(ctl, k) {
+    if (!ctl || !k || k === ctl.kid || k.team !== ctl.team || G.mode !== "play") return;
+    const prev = ctl.kid;
+    const other = k.ctl && k.ctl !== ctl ? k.ctl : null;
+    if (prev) { prev.ctl = null; prev.isHuman = false; prev.ai.stone = null; prev.ai.receiving = false; }
+    k.ctl = ctl; k.isHuman = true; k.ai.stone = null; k.ai.receiving = false;
+    ctl.kid = k;
+    ctl.charge.active = false;
+    ctl.lockTarget = null;
+    ctl.switchFlash = 0.45;
+    if (other) {
+      // Two friends on one team: the other player takes over the kid we just left.
+      other.kid = null;
+      if (prev && prev.alive) bindCtl(other, prev);
+      else moveCtlToNearest(other);
+      other.switchFlash = 0.45;
+    }
+    syncHuman();
+  }
+
+  function canSwitch(ctl) {
+    if (G.mode !== "play" || !ctl) return false;
+    if (G.paused && !G.net) return false;
+    if (G.ctx === "tutorial" && G.tut && G.tut.step < 3) return false;
+    const free = aliveOf(ctl.team).filter((k) => !k.ctl).length;
+    if (G.phase === "rebuild") return free > 0;
+    return G.phase === "throw" && G.attacking !== ctl.team && free > 0;
   }
 
   // Defending: jump to whoever has the ball, else the teammate closest to it.
   // Attacking: cycle through teammates who are still in.
-  function switchPlayer(to) {
-    if (!canSwitch()) return;
-    const h = G.human;
-    let next = to || null;
+  function switchPlayer(ctl, to) {
+    if (!canSwitch(ctl)) return;
+    const h = ctl.kid;
+    let next = to && to.team === ctl.team && to.alive && !to.ctl ? to : null;
     if (!next) {
-      const mates = aliveOf(G.humanTeam).filter((k) => k !== h);
-      if (G.attacking !== G.humanTeam) {
+      const mates = aliveOf(ctl.team).filter((k) => !k.ctl);
+      if (G.attacking !== ctl.team) {
         const b = G.ball;
         next = mates.find((k) => k.hasBall) || mates.sort((a, c) => dist(a, b) - dist(c, b))[0];
       } else {
-        const all = teamKids(G.humanTeam);
+        const all = teamKids(ctl.team);
         const i = all.indexOf(h);
         for (let j = 1; j <= all.length && !next; j++) {
           const c = all[(i + j) % all.length];
-          if (c.alive && c !== h) next = c;
+          if (c.alive && !c.ctl) next = c;
         }
       }
     }
-    if (next && next.alive) {
-      setControlled(next);
-      sfx.pickup();
-      if (G.tut && G.tut.step === 3) G.tut.switched = true;
+    if (next) {
+      setControlled(ctl, next);
+      fx({ e: "sfx", n: "pickup", to: ctl.id });
+      if (G.tut && G.tut.step === 3 && ctl.local) G.tut.switched = true;
     }
   }
 
-  function updateLock() {
-    const h = G.human;
-    if (!h || !h.alive || !h.hasBall || G.phase !== "rebuild") { G.lockTarget = null; return; }
-    if (G.lockTarget && !G.lockTarget.alive) G.lockTarget = null;
+  function updateLock(ctl) {
+    if (!ctl) return;
+    const h = ctl.kid;
+    if (!h || !h.alive || !h.hasBall || G.phase !== "rebuild") { ctl.lockTarget = null; return; }
+    if (ctl.lockTarget && !ctl.lockTarget.alive) ctl.lockTarget = null;
     if (input.lockMode === "pointer" && input.pointer.valid) {
-      G.lockTarget = attackerNear(input.pointer.x, input.pointer.y, 130);
-    } else if (!G.lockTarget) {
-      G.lockTarget = rankAttackers(h)[0] || null;
+      ctl.lockTarget = attackerNear(input.pointer.x, input.pointer.y, 130);
+    } else if (!ctl.lockTarget) {
+      ctl.lockTarget = rankAttackers(h)[0] || null;
     }
   }
 
@@ -1087,35 +1260,68 @@
     return best;
   }
 
-  function cycleTarget() {
-    if (humanIsThrowing()) {
-      if (!G.aimHelp) return;
-      // Lock the throwing arrow straight onto the tower.
-      input.usingKeysAim = true;
-      G.aimAngle = Math.atan2(TOWER.y - G.human.y, TOWER.x - G.human.x);
-      G.switchFlash = 0.3;
-      sfx.tick();
-      return;
+  function isThrowing(ctl) {
+    const k = ctl && ctl.kid;
+    return G.mode === "play" && G.phase === "throw" && G.throwState === "aim" &&
+      !!k && currentThrower() === k && k.alive && dist(k, G.throwPos) < 8;
+  }
+
+  function canDash(ctl) {
+    const k = ctl && ctl.kid;
+    if (!k || !k.alive || G.mode !== "play" || (G.paused && !G.net)) return false;
+    if (G.phase === "rebuild") return !k.hasBall;
+    return G.phase === "throw" && !isAttacker(k);
+  }
+
+  // Everything a player can do goes through an action, so the host can apply a
+  // friend's actions exactly like its own.
+  function applyAction(ctl, a) {
+    const k = ctl && ctl.kid;
+    switch (a.a) {
+      case "release":
+        if (isThrowing(ctl)) releaseThrow(ctl, clamp(+a.p || 0, 0, 1), +a.ang || 0);
+        break;
+      case "lock": {
+        const tk = G.kids[a.t];
+        if (k && k.hasBall && G.phase === "rebuild" && tk && tk.alive && tk.team === G.attacking) throwAt(k, tk, HUMAN_THROW);
+        break;
+      }
+      case "at":
+        if (k && k.hasBall && G.phase === "rebuild") launch(k, +a.x, +a.y, 900, 28, true);
+        break;
+      case "pass": {
+        const m = G.kids[a.t];
+        if (k && k.hasBall && G.phase === "rebuild" && m && m.alive && m.team === k.team && m !== k) {
+          launch(k, m.x, m.y, 760, 38, true);
+          G.ball.passTo = m;
+          m.ai.receiving = true;
+        }
+        break;
+      }
+      case "switch":
+        switchPlayer(ctl, a.t != null ? G.kids[a.t] : null);
+        break;
+      case "dash":
+        if (canDash(ctl)) dash(k);
+        break;
+      default: break;
     }
-    const h = G.human;
-    if (!h || !h.hasBall || G.phase !== "rebuild") return;
-    const list = rankAttackers(h);
-    if (!list.length) return;
-    input.lockMode = "manual";
-    const i = list.indexOf(G.lockTarget);
-    G.lockTarget = list[(i + 1) % list.length];
-    sfx.tick();
   }
 
-  function humanThrowAtLock() {
-    const h = G.human, tk = G.lockTarget;
-    if (!h || !h.hasBall || !tk || !tk.alive || G.phase !== "rebuild") return false;
-    throwAt(h, tk, { throwSpd: 900, lead: 1, errPx: 7 });
-    return true;
+  function doAction(a) {
+    if (G.net === "guest") {
+      Net.send({ t: "act", x: a });
+      // Predict a dash straight away so it feels instant.
+      if (a.a === "dash" && G.human && G.human.dashCD <= 0) { G.human.dashT = 0.2; G.human.dashCD = 1.1; }
+    } else {
+      applyAction(G.localCtl, a);
+    }
   }
 
-  // --- Human -----------------------------------------------------------------
+  // --- Human movement ---------------------------------------------------------
   function humanMove(k, dt, canMove) {
+    const ctl = k.ctl;
+    if (!ctl.local) { remoteMove(k, dt); return; }
     let dx = 0, dy = 0;
     if (canMove) {
       const v = input.moveVector();
@@ -1131,30 +1337,17 @@
     }
   }
 
-  function humanCanDash() {
-    const k = G.human;
-    if (!k || !k.alive || G.mode !== "play" || G.paused) return false;
-    if (G.phase === "rebuild") return !k.hasBall;
-    return G.phase === "throw" && !isAttacker(k);
-  }
-
-  function humanIsThrowing() {
-    return G.mode === "play" && G.phase === "throw" && G.throwState === "aim" &&
-      G.human && currentThrower() === G.human && G.human.alive && dist(G.human, G.throwPos) < 8;
-  }
-
-  function humanThrowFromHand(wx, wy, touch) {
-    const k = G.human;
-    if (!k || !k.hasBall || G.phase !== "rebuild") return;
-    const near = attackerNear(wx, wy, touch ? 80 : 130);
-    if (near) { G.lockTarget = near; humanThrowAtLock(); return; }
-    const mate = aliveOf(k.team).find((m) => m !== k && Math.hypot(m.x - wx, m.y - wy) < 55);
-    if (mate) {
-      launch(k, mate.x, mate.y, 760, 38, true);
-      G.ball.passTo = mate;
-      mate.ai.receiving = true;
+  // The friend's device moves its own kid and reports where it is; the host
+  // follows that report closely so the friend's movement never feels laggy.
+  function remoteMove(k, dt) {
+    const n = k.ctl.net;
+    if (n && n.kid === kidIdx(k) && freeMove(k) && G.time - n.at < 0.5) {
+      const age = Math.min(0.15, G.time - n.at);
+      const tx = n.x + n.vx * age, ty = n.y + n.vy * age;
+      k.vx = clamp((tx - k.x) * 12, -700, 700);
+      k.vy = clamp((ty - k.y) * 12, -700, 700);
     } else {
-      launch(k, wx, wy, 900, 28, true);
+      applyMove(k, 0, 0, dt, 1, 14);
     }
   }
 
@@ -1374,13 +1567,13 @@
     if (b.z <= 0) {
       b.z = 0;
       if (b.vz < -120) {
-        play(() => sfx.bounce(-b.vz / 600));
+        sound("bounce", r1(-b.vz / 600));
         b.vz = -b.vz * 0.42;
         b.vx *= 0.86; b.vy *= 0.86;
         b.bounced++;
         b.live = false;
         b.fromThrow = false;
-        if (b.bounced === 1) dust(b.x, b.y, 3, "#d9c08f");
+        if (b.bounced === 1) fxDust(b.x, b.y, 3, "#d9c08f");
       } else {
         b.vz = 0;
         const sp = Math.hypot(b.vx, b.vy);
@@ -1428,12 +1621,13 @@
 
   function hitKid(k) {
     const b = G.ball;
-    if (b.thrower && b.thrower.isHuman && G.mode === "play") { G.stats.hits++; addTotal("hits"); }
+    const by = b.thrower && b.thrower.ctl;
+    if (by && G.mode === "play") { by.stats.hits++; addTotalFor(by, "hits"); }
     b.vx *= -0.3; b.vy *= -0.3; b.vz = 160;
     b.live = false;
     shakeScreen(6);
-    dust(k.x, k.y, 8, "#ffffff");
-    play(sfx.hit);
+    fxDust(k.x, k.y, 8, "#ffffff");
+    sound("hit");
     eliminate(k, "hit");
   }
 
@@ -1443,24 +1637,22 @@
     let dx, dy;
     if (sp > 30) { dx = k.vx / sp; dy = k.vy / sp; }
     else { const d = Math.hypot(b.x - k.x, b.y - k.y) || 1; dx = (b.x - k.x) / d; dy = (b.y - k.y) / d; }
-    const power = 470 + sp * 0.9;
+    const power = 470 + Math.min(sp, 600) * 0.9;
     b.vx = dx * power; b.vy = dy * power; b.vz = 120;
     b.kickCD = 0.35; b.live = false; b.fromThrow = false; b.ignore = k; b.ignoreT = 0.2;
-    if (k.isHuman && G.mode === "play") { G.stats.kicks++; addTotal("kicks"); }
-    dust(b.x, b.y, 4, "#d9c08f");
-    play(sfx.kick);
+    if (k.ctl && G.mode === "play") { k.ctl.stats.kicks++; addTotalFor(k.ctl, "kicks"); }
+    fxDust(b.x, b.y, 4, "#d9c08f");
+    sound("kick");
   }
 
   function catchOnTheFull(k) {
     const b = G.ball;
     const thrower = b.thrower;
     defenderTakeBall(k);
-    if (k.isHuman && G.mode === "play") { G.stats.catches++; unlock("safe_hands"); }
+    if (k.ctl && G.mode === "play") { k.ctl.stats.catches++; unlockFor(k.ctl, "safe_hands"); }
     if (!G.rules.catchOut) return;
     if (thrower && thrower.alive) eliminate(thrower, "caught");
-    if (G.mode === "play" && G.phase === "throw" && thrower) {
-      showBanner(t("b.caught"), thrower.isHuman ? t("b.youOut") : t("b.caughtSub", { name: kidName(thrower) }), teamOf(k.team).dark, 1.2);
-    }
+    if (G.mode === "play" && G.phase === "throw" && thrower) fx({ e: "caught", thr: kidIdx(thrower), team: k.team });
   }
 
   // --- Stones physics --------------------------------------------------------
@@ -1475,7 +1667,7 @@
       if (s.z <= 0) {
         s.z = 0;
         if (s.vz < -110) {
-          if (s.vz < -250) play(() => sfx.clack());
+          if (s.vz < -250) sound("clack");
           s.vz = -s.vz * 0.28;
           s.vx *= 0.65; s.vy *= 0.65;
         } else {
@@ -1494,12 +1686,8 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Effects
+  // Particles (drawn locally; the host sends fx events for them)
   // ---------------------------------------------------------------------------
-  function shakeScreen(v) {
-    if (settings.shake && !reduceMotion) G.shake = Math.max(G.shake, v);
-  }
-
   function dust(x, y, n, color) {
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
@@ -1532,10 +1720,6 @@
     if (G.particles.length > 450) G.particles.splice(0, G.particles.length - 450);
   }
 
-  function floater(x, y, text, color, life) {
-    G.floaters.push({ x, y, text, color, life: 0, max: life || 1 });
-  }
-
   function updateFx(dt) {
     for (const p of G.particles) {
       p.life += dt;
@@ -1553,8 +1737,248 @@
     G.floaters = G.floaters.filter((f) => f.life < f.max);
   }
 
-  function play(fn) {
-    if (G.mode === "play") fn();
+  // ---------------------------------------------------------------------------
+  // Online play: the host runs the game and sends snapshots; the friend's device
+  // draws them, moves its own kid and sends back position and actions.
+  // ---------------------------------------------------------------------------
+  let netSendT = 0;
+
+  function hostSnapshot() {
+    const b = G.ball;
+    Net.send({
+      t: "s",
+      ph: G.phase, sc: G.scores, at: G.attacking, rd: G.round,
+      ts: G.throwState, ti: G.throwIdx, tn: G.throwOrder.length, th: kidIdx(currentThrower()),
+      tp: [r1(G.throwPos.x), r1(G.throwPos.y)], wi: r2(G.wind),
+      pl: G.placed, tu: G.towerUp ? 1 : 0, rt: r1(G.rebuildT), lw: G.lastWinner,
+      k: G.kids.map((k) => [
+        r1(k.x), r1(k.y), r1(k.vx), r1(k.vy), r2(k.fx), r2(k.fy),
+        k.alive ? 1 : 0, k.carrying ? k.carrying.i : -1, k.hasBall ? 1 : 0,
+        r2(k.placeT), r2(k.holdT), r2(k.dashCD), r1(k.cheer), r2(k.throwAnim), r2(k.hitFlash),
+        k.ctl ? k.ctl.id : 0, k.bench ? k.bench.x : 0,
+      ]),
+      s: G.stones.map((s) => [r1(s.x), r1(s.y), r1(s.z), s.placed ? 1 : 0, s.staged ? 1 : 0, s.carriedBy ? kidIdx(s.carriedBy) : -1]),
+      b: [r1(b.x), r1(b.y), r1(b.z), r1(b.vx), r1(b.vy), r1(b.vz), b.live ? 1 : 0, kidIdx(b.holder), kidIdx(b.targetKid), r1(b.spin)],
+      ev: netEvents.splice(0, netEvents.length),
+    });
+  }
+
+  function matchSetupMessage() {
+    return {
+      t: "start",
+      teams: G.teams.map((tm) => ({ id: tm.id, label: tm.label })),
+      kids: G.kids.map((k) => ({ team: k.team, idx: k.idx, names: k.names, skin: k.skin, hair: k.hair, hairStyle: k.hairStyle })),
+      field: G.field, rules: G.rules, diff: G.diff, target: G.target, mode: G.online.mode,
+      ctls: G.ctls.map((c) => ({ id: c.id, team: c.team, kid: kidIdx(c.kid) })),
+    };
+  }
+
+  function startGuestMatch(m) {
+    G.mode = "play";
+    G.ctx = "online";
+    G.net = "guest";
+    G.online = { mode: m.mode };
+    G.teams = m.teams.map((tm) => teamFor(tm.id, tm.label));
+    G.rules = m.rules;
+    G.diff = m.diff;
+    const D = DIFF[m.diff] || DIFF.normal;
+    G.sweet = D.sweet;
+    G.meter = D.meter;
+    G.aimHelp = D.aimHelp;
+    G.target = m.target;
+    G.scores = [0, 0];
+    G.round = 0;
+    G.newAch = [];
+    G.tut = null;
+    G.paused = false;
+    G.phase = "intro";
+    G.particles.length = 0;
+    G.floaters.length = 0;
+    G.snap = null;
+    setField(m.field);
+    G.kids = m.kids.map((d) => makeKid(d.team, d.idx, d.names, d));
+    G.ctls = m.ctls.map((c) => makeCtl(c.id, c.team, c.id === "g"));
+    G.localCtl = ctlById("g");
+    m.ctls.forEach((c) => bindCtl(ctlById(c.id), G.kids[c.kid]));
+    G.humanTeam = G.localCtl.team;
+    G.stats = G.localCtl.stats;
+    makeStones();
+    makeBall();
+    hudReset();
+    cam.snap = true;
+  }
+
+  function applySnapshot(m) {
+    const first = !G.snap;
+    G.snap = m;
+    G.snapAt = G.time;
+    if (G.phase !== m.ph) G.phaseT = 0;
+    G.phase = m.ph;
+    G.scores = m.sc;
+    G.attacking = m.at;
+    G.round = m.rd;
+    G.throwState = m.ts;
+    G.throwIdx = m.ti;
+    G.throwOrder.length = m.tn;
+    G.snapThrower = m.th;
+    G.throwPos = { x: m.tp[0], y: m.tp[1] };
+    G.wind = m.wi;
+    G.placed = m.pl;
+    G.towerUp = !!m.tu;
+    G.rebuildT = m.rt;
+    G.lastWinner = m.lw;
+
+    // Stones first, so kids can point at the stone they carry.
+    G.stones.forEach((s, i) => {
+      const a = m.s[i];
+      s.sx = a[0]; s.sy = a[1]; s.sz = a[2];
+      s.placed = !!a[3]; s.staged = !!a[4];
+      s.carriedBy = a[5] >= 0 ? G.kids[a[5]] : null;
+      if (first || s.placed || s.staged) { s.x = s.sx; s.y = s.sy; s.z = s.sz; }
+    });
+
+    const prevKid = G.human;
+    G.ctls.forEach((c) => { c.kid = null; });
+    G.kids.forEach((k, i) => {
+      const a = m.k[i];
+      if (!a) return;
+      k.sx = a[0]; k.sy = a[1]; k.svx = a[2]; k.svy = a[3];
+      if (k !== prevKid || !freeMove(k)) { k.fx = a[4]; k.fy = a[5]; }
+      k.alive = !!a[6];
+      k.carrying = a[7] >= 0 ? G.stones[a[7]] : null;
+      k.hasBall = !!a[8];
+      k.placeT = a[9]; k.holdT = a[10];
+      if (k !== prevKid) k.dashCD = a[11];
+      k.cheer = a[12]; k.throwAnim = a[13]; k.hitFlash = a[14];
+      const ctl = a[15] ? ctlById(a[15]) : null;
+      k.ctl = ctl; k.isHuman = !!ctl;
+      if (ctl) ctl.kid = k;
+      k.bench = k.alive ? null : { x: a[16], y: 864 };
+      if (first) { k.x = k.sx; k.y = k.sy; }
+    });
+    syncHuman();
+    if (G.human && G.human !== prevKid) {
+      G.localCtl.switchFlash = 0.45;
+      G.human.x = G.human.sx; G.human.y = G.human.sy;
+    }
+
+    const b = G.ball;
+    const ba = m.b;
+    b.sx = ba[0]; b.sy = ba[1]; b.sz = ba[2]; b.vx = ba[3]; b.vy = ba[4]; b.vz = ba[5];
+    b.live = !!ba[6];
+    b.holder = ba[7] >= 0 ? G.kids[ba[7]] : null;
+    b.targetKid = ba[8] >= 0 ? G.kids[ba[8]] : null;
+    b.spin = ba[9];
+    if (first) { b.x = b.sx; b.y = b.sy; b.z = b.sz; }
+
+    (m.ev || []).forEach(applyFx);
+  }
+
+  // Guest frame: smooth everything toward the latest snapshot, move our own kid locally.
+  function guestUpdate(dt) {
+    G.time += dt;
+    G.phaseT += dt;
+    updateFx(dt);
+    if (!G.snap) return;
+    const age = Math.min(0.15, G.time - G.snapAt);
+    const a = Math.min(1, dt * 14);
+    const own = G.human;
+    const ownFree = freeMove(own);
+
+    G.kids.forEach((k) => {
+      if (k === own && ownFree) return;
+      const tx = k.sx + k.svx * age, ty = k.sy + k.svy * age;
+      if (Math.hypot(tx - k.x, ty - k.y) > 220) { k.x = tx; k.y = ty; }
+      k.x += (tx - k.x) * a;
+      k.y += (ty - k.y) * a;
+      k.vx = k.svx; k.vy = k.svy;
+    });
+
+    if (own && ownFree) {
+      const v = input.moveVector();
+      let dx = v.x, dy = v.y;
+      if (own.dashT > 0 && !dx && !dy) { dx = own.fx; dy = own.fy; }
+      applyMove(own, dx, dy, dt, 1, 14);
+      own.x = clamp(own.x + own.vx * dt, BOUNDS.l, BOUNDS.r);
+      own.y = clamp(own.y + own.vy * dt, BOUNDS.t, BOUNDS.b);
+      if (!isAttacker(own)) keepOutOfCircle(own);
+      const sp = Math.hypot(own.vx, own.vy);
+      if (sp > 18) { own.fx = own.vx / sp; own.fy = own.vy / sp; }
+      // If the host disagrees a lot (we were pushed or moved), accept its position.
+      if (Math.hypot(own.sx - own.x, own.sy - own.y) > 160) { own.x = own.sx; own.y = own.sy; }
+    }
+    if (own && own.hasBall && input.pointer.valid) {
+      const ax = input.pointer.x - own.x, ay = input.pointer.y - own.y;
+      const d = Math.hypot(ax, ay) || 1;
+      own.fx = ax / d; own.fy = ay / d;
+    }
+
+    G.kids.forEach((k) => {
+      const sp = Math.hypot(k.vx, k.vy);
+      if (sp > 18) k.anim += sp * dt * 0.055;
+      if (k === own) { k.dashT = Math.max(0, k.dashT - dt); k.dashCD = Math.max(0, k.dashCD - dt); }
+    });
+
+    G.stones.forEach((s) => {
+      if (s.carriedBy) { s.x = s.carriedBy.x; s.y = s.carriedBy.y + 0.5; s.z = 58; return; }
+      if (s.placed || s.staged) return;
+      s.x += (s.sx - s.x) * a; s.y += (s.sy - s.y) * a; s.z += (s.sz - s.z) * a;
+    });
+
+    const b = G.ball;
+    if (b.holder) {
+      const h = b.holder;
+      b.x = h.x + h.fx * 12; b.y = h.y + 1; b.z = 22;
+    } else {
+      const tx = b.sx + b.vx * age, ty = b.sy + b.vy * age;
+      const tz = Math.max(0, b.sz + b.vz * age - 0.5 * GRAV * age * age);
+      if (Math.hypot(tx - b.x, ty - b.y) > 200) { b.x = tx; b.y = ty; }
+      const ba = Math.min(1, dt * 25);
+      b.x += (tx - b.x) * ba; b.y += (ty - b.y) * ba; b.z += (tz - b.z) * ba;
+      b.spin += Math.hypot(b.vx, b.vy) * dt * 0.05;
+    }
+
+    G.shake = Math.max(0, G.shake - dt * 40);
+    G.ctls.forEach((c) => { c.switchFlash = Math.max(0, c.switchFlash - dt); });
+    updateLocalAim(dt);
+    updateLock(G.localCtl);
+
+    netSendT += dt;
+    if (netSendT >= INPUT_EVERY) {
+      netSendT = 0;
+      const msg = { t: "in", k: kidIdx(own) };
+      if (own && freeMove(own)) msg.p = [r1(own.x), r1(own.y), r1(own.vx), r1(own.vy)];
+      Net.send(msg);
+    }
+  }
+
+  function guestMatchEnd(ev) {
+    G.phase = "matchEnd";
+    const won = ev.w === localTeam();
+    G.stats = ev.st || G.localCtl.stats;
+    if (won) {
+      settings.wins++;
+      unlock("first_win");
+      if (G.diff === "hard" && G.online.mode === "coop") unlock("tough");
+      sfx.win();
+      confettiBurst(W / 2, H / 2 - 100, 140);
+    } else {
+      settings.losses++;
+    }
+    saveSettings();
+    clearTimeout(resultTimer);
+    resultTimer = setTimeout(() => showResult(won, null), 1300);
+  }
+
+  function hostOnData(m) {
+    if (!m || G.net !== "host") return;
+    const guest = ctlById("g");
+    if (!guest) return;
+    if (m.t === "in") {
+      if (Array.isArray(m.p)) guest.net = { kid: m.k, x: +m.p[0], y: +m.p[1], vx: +m.p[2], vy: +m.p[3], at: G.time };
+    } else if (m.t === "act" && m.x && typeof m.x.a === "string") {
+      applyAction(guest, m.x);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1652,7 +2076,6 @@
     c.setTransform(s, 0, 0, s, BGX * s, BGY * s);
     const r = mulberry32(2024);
 
-    // Grass
     const g = c.createLinearGradient(0, -BGY, 0, H + BGY);
     g.addColorStop(0, look.grass[0]);
     g.addColorStop(0.5, look.grass[1]);
@@ -1722,7 +2145,6 @@
       c.fill();
     }
 
-    // Chalk: field boundary, throw line, tower circle
     c.strokeStyle = "rgba(255,255,255,0.5)";
     c.lineWidth = 4;
     c.setLineDash([]);
@@ -1748,7 +2170,6 @@
 
     drawTopBand(c, field, r);
 
-    // Side trees
     const trees = [];
     for (let y = 150; y < H + BGY; y += 120 + r() * 60) {
       trees.push({ x: 20 + r() * 30 - (r() < 0.5 ? 70 : 0), y, s: 0.7 + r() * 0.5 });
@@ -1769,7 +2190,6 @@
       c.fill();
     }
 
-    // Mood tint
     if (field === "monsoon") {
       c.fillStyle = "rgba(40,60,80,0.2)";
       c.fillRect(-BGX, -BGY, fullW, fullH);
@@ -1812,7 +2232,6 @@
     }
 
     if (field === "school") {
-      // Brick boundary wall and the school building
       c.fillStyle = "#a8452c";
       c.fillRect(-BGX, 64, W + BGX * 2, 66);
       c.strokeStyle = "rgba(255,220,190,0.35)";
@@ -1834,7 +2253,6 @@
       }
       c.fillStyle = "#2b2118";
       c.fillRect(770, 0, 60, 66);
-      // Bangladesh flag on a pole
       c.fillStyle = "#ddd";
       c.fillRect(1290, -40, 5, 170);
       c.fillStyle = "#006a4e";
@@ -1853,7 +2271,6 @@
     drawPalm(c, W - 110, 120, 1.05, 1);
 
     if (field === "festival") {
-      // Mela stalls and bunting
       const cols = ["#e0457b", "#e8c22a", "#2f6fc0", "#f08a24", "#52b06a"];
       for (let i = 0; i < 6; i++) {
         const x = 260 + i * 200, y = 118;
@@ -2009,7 +2426,6 @@
 
     drawGroundGuides();
 
-    // Shadows first, then everything sorted by depth.
     const items = [];
     G.kids.forEach((kd) => items.push({ y: kd.y, draw: () => drawKid(kd), shadow: () => shadowAt(kd.x, kd.y, 15, 0.26) }));
     G.stones.forEach((s) => {
@@ -2045,7 +2461,7 @@
 
   function drawGroundGuides() {
     const h = G.human;
-    if (G.phase === "rebuild" && h && h.alive && (h.carrying || pileNext())) {
+    if (G.phase === "rebuild" && h && h.alive && isAttacker(h) && (h.carrying || pileNext())) {
       const p = 0.5 + Math.sin(G.time * 6) * 0.25;
       ctx.strokeStyle = `rgba(255,243,176,${p})`;
       ctx.lineWidth = 6;
@@ -2053,7 +2469,6 @@
       ctx.ellipse(TOWER.x, TOWER.y, PLACE_R, PLACE_R * RING_Y, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
-    // Loose stones pulse; the next one needed gets a gold ring.
     if (G.phase === "rebuild") {
       const p = (G.time * 1.6) % 1;
       G.stones.forEach((s) => {
@@ -2068,9 +2483,9 @@
       });
     }
     // Teammates you can switch to.
-    if (canSwitch()) {
-      aliveOf(G.humanTeam).forEach((m) => {
-        if (m === h) return;
+    if (canSwitch(G.localCtl)) {
+      aliveOf(localTeam()).forEach((m) => {
+        if (m.ctl) return;
         ctx.strokeStyle = teamOf(m.team).light;
         ctx.globalAlpha = 0.75;
         ctx.lineWidth = 2.5;
@@ -2082,12 +2497,16 @@
         ctx.globalAlpha = 1;
       });
     }
-    if (h && h.alive && G.mode === "play") {
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.ellipse(h.x, h.y, 19, 8, 0, 0, Math.PI * 2);
-      ctx.stroke();
+    if (G.mode === "play") {
+      G.ctls.forEach((c) => {
+        const k = c.kid;
+        if (!k || !k.alive) return;
+        ctx.strokeStyle = c.local ? "rgba(255,255,255,0.9)" : teamOf(k.team).light;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.ellipse(k.x, k.y, 19, 8, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      });
     }
   }
 
@@ -2124,8 +2543,7 @@
   function drawTower() {
     const placed = G.stones.filter((s) => s.placed).sort((a, b) => a.i - b.i);
     if (G.phase === "rebuild" && placed.length < STONE_W.length) {
-      // Ghost outline of the next slot so players know which size goes on next.
-      const nw = STONE_W[G.placed];
+      const nw = STONE_W[Math.min(G.placed, STONE_W.length - 1)];
       ctx.strokeStyle = "rgba(255,215,90,0.75)";
       ctx.setLineDash([5, 5]);
       ctx.lineWidth = 2;
@@ -2289,15 +2707,27 @@
     }
     ctx.restore();
 
-    if (k.isHuman && k.alive && G.mode === "play") {
+    // Player markers: white for you, team colour plus a label for your friend.
+    if (k.ctl && k.alive && G.mode === "play") {
+      const local = k.ctl.local;
       const my = k.y - 72 - Math.sin(G.time * 5) * 3 - (k.carrying ? 18 : 0);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = local ? "#fff" : team.light;
       ctx.strokeStyle = "rgba(0,0,0,0.35)";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(k.x - 7, my - 8); ctx.lineTo(k.x + 7, my - 8); ctx.lineTo(k.x, my);
       ctx.closePath();
       ctx.fill(); ctx.stroke();
+      if (!local) {
+        ctx.font = "800 13px 'Baloo Da 2', system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(40,25,15,0.8)";
+        ctx.strokeText(t("on.friend"), k.x, my - 18);
+        ctx.fillStyle = team.light;
+        ctx.fillText(t("on.friend"), k.x, my - 18);
+      }
     }
     if (k.placeT > 0 && k.alive) {
       ctx.strokeStyle = "#fff3b0";
@@ -2306,8 +2736,7 @@
       ctx.arc(k.x, k.y - 30, 26, -Math.PI / 2, -Math.PI / 2 + (k.placeT / PLACE_TIME) * Math.PI * 2);
       ctx.stroke();
     }
-    // Ball-holding countdown for the player.
-    if (k.isHuman && k.hasBall && G.phase === "rebuild" && G.rules.holdLimit) {
+    if (k === G.human && k.hasBall && G.phase === "rebuild" && G.rules.holdLimit) {
       const left = 1 - k.holdT / HOLD_LIMIT;
       ctx.strokeStyle = left < 0.34 ? "#ff6e5a" : "#ffffff";
       ctx.lineWidth = 4;
@@ -2358,7 +2787,7 @@
     ctx.stroke();
   }
 
-  // Wind sock above the tower: arrow shows direction, bars show strength.
+  // Wind sign above the tower: arrow shows direction, bars show strength.
   function drawWind() {
     if (G.mode !== "play" || (G.phase !== "throw" && G.phase !== "intro")) return;
     const x = TOWER.x, y = TOWER.y - 132;
@@ -2384,7 +2813,6 @@
         ctx.fillStyle = i < level ? "#ffd65a" : "rgba(255,255,255,0.25)";
         ctx.fillRect(x + 32 + i * 6, y + 6 - i * 4, 4, 4 + i * 4);
       }
-      // A few drifting leaves make the wind visible on the field too.
       for (let i = 0; i < 6; i++) {
         const ph = (G.time * 0.35 * Math.abs(w) + i / 6) % 1;
         const lx = 380 + i * 150 + Math.sin(G.time * 2 + i) * 20;
@@ -2403,12 +2831,13 @@
     ctx.font = "800 26px 'Baloo Da 2', system-ui, sans-serif";
     for (const f of G.floaters) {
       const q = f.life / f.max;
+      const text = f.key ? t(f.key, f.vars) : num(f.text || "");
       ctx.globalAlpha = q < 0.75 ? 1 : 1 - (q - 0.75) / 0.25;
       ctx.lineWidth = 5;
       ctx.strokeStyle = "rgba(40,25,15,0.8)";
-      ctx.strokeText(f.text, f.x, f.y);
+      ctx.strokeText(text, f.x, f.y);
       ctx.fillStyle = f.color;
-      ctx.fillText(f.text, f.x, f.y);
+      ctx.fillText(text, f.x, f.y);
     }
     ctx.globalAlpha = 1;
   }
@@ -2440,11 +2869,10 @@
     }
   }
 
-  // Markers that tell the player who is being aimed at and who they control.
   function drawTargets() {
     const h = G.human;
     const b = G.ball;
-    if (b && !b.holder && b.live && b.targetKid && b.targetKid.alive && b.targetKid.team === G.humanTeam) {
+    if (b && !b.holder && b.live && b.targetKid && b.targetKid.alive && b.targetKid.team === localTeam()) {
       const tk = b.targetKid;
       const p = 0.6 + Math.sin(G.time * 22) * 0.4;
       ctx.strokeStyle = `rgba(255,70,50,${p})`;
@@ -2459,8 +2887,9 @@
         ctx.fillText("!", tk.x + 22, tk.y - 62);
       }
     }
-    if (h && G.switchFlash > 0 && h.alive) {
-      const q = 1 - G.switchFlash / 0.45;
+    const ctl = G.localCtl;
+    if (h && ctl && ctl.switchFlash > 0 && h.alive) {
+      const q = 1 - ctl.switchFlash / 0.45;
       ctx.strokeStyle = `rgba(255,255,255,${1 - q})`;
       ctx.lineWidth = 4;
       ctx.beginPath();
@@ -2470,19 +2899,20 @@
   }
 
   function drawAimUI() {
-    if (G.mode !== "play" || G.paused) return;
+    if (G.mode !== "play" || (G.paused && !G.net)) return;
     drawTargets();
+    const ctl = G.localCtl;
     const h = G.human;
-    if (!h || !h.alive) return;
+    if (!ctl || !h || !h.alive) return;
 
-    if (humanIsThrowing()) {
+    if (isThrowing(ctl)) {
       const tx = TOWER.x - h.x, ty = TOWER.y - h.y;
-      const along = tx * Math.cos(G.aimAngle) + ty * Math.sin(G.aimAngle);
-      const off = Math.abs(-tx * Math.sin(G.aimAngle) + ty * Math.cos(G.aimAngle));
+      const along = tx * Math.cos(ctl.aimAngle) + ty * Math.sin(ctl.aimAngle);
+      const off = Math.abs(-tx * Math.sin(ctl.aimAngle) + ty * Math.cos(ctl.aimAngle));
       const onTarget = G.aimHelp && along > 0 && off < TOWER_HIT_R - 4;
       drawReticle(TOWER.x, TOWER.y - 26, 42, onTarget ? "#7dff9a" : "#ffffff", onTarget ? t("tgt.on") : t("tgt.target"));
 
-      const a = G.aimAngle;
+      const a = ctl.aimAngle;
       const len = 150;
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
       ctx.lineWidth = 4;
@@ -2502,7 +2932,6 @@
       ctx.closePath();
       ctx.fill();
 
-      // Power meter
       const [lo, hi] = G.sweet;
       const mx = h.x - 58, my = h.y - 128, mw = 16, mh = 104;
       ctx.fillStyle = "rgba(43,33,24,0.82)";
@@ -2514,18 +2943,18 @@
       ctx.fillRect(mx, my + mh * (1 - 0.76), mw, mh * (0.76 - 0.22));
       ctx.fillStyle = "#52c46a";
       ctx.fillRect(mx, my + mh * (1 - hi), mw, mh * (hi - lo));
-      const p = G.charge.active ? G.charge.p : 0;
+      const p = ctl.charge.active ? ctl.charge.p : 0;
       const py = my + mh * (1 - p);
       ctx.fillStyle = "#fff";
       ctx.fillRect(mx - 6, py - 2.5, mw + 12, 5);
-      if (G.charge.active) {
+      if (ctl.charge.active) {
         ctx.fillStyle = "rgba(255,255,255,0.35)";
         ctx.fillRect(mx, py, mw, my + mh - py);
       }
     }
 
-    if (G.phase === "rebuild" && h.hasBall && G.lockTarget) {
-      const tk = G.lockTarget;
+    if (G.phase === "rebuild" && h.hasBall && ctl.lockTarget) {
+      const tk = ctl.lockTarget;
       ctx.strokeStyle = "rgba(255,110,90,0.9)";
       ctx.lineWidth = 3;
       ctx.setLineDash([10, 8]);
@@ -2563,7 +2992,6 @@
     }
   }
 
-  // Small overview of the whole field when the camera is zoomed in.
   function drawMinimap() {
     const { dpr } = view;
     const mw = 150, mh = 84, mx = 12, my = view.ch - mh - 14;
@@ -2588,7 +3016,7 @@
       ctx.beginPath();
       ctx.arc(mx + k.x * sx, my + k.y * sy, k.isHuman ? 3.5 : 2.5, 0, Math.PI * 2);
       ctx.fill();
-      if (k.isHuman) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); }
+      if (k === G.human) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); }
     });
     const b = G.ball;
     ctx.fillStyle = "#ff3b2a";
@@ -2623,32 +3051,89 @@
     },
   };
 
+  const playingHere = () => G.mode === "play" && (!G.paused || !!G.net);
+
   function joystickAllowed() {
     const h = G.human;
-    if (!h || !h.alive || G.mode !== "play" || G.paused) return false;
+    if (!h || !h.alive || !playingHere()) return false;
     if (G.phase === "rebuild") return !h.hasBall;
     return G.phase === "throw" && !isAttacker(h);
   }
 
   function aimDown(touch) {
-    if (G.paused || G.mode !== "play") return;
-    if (humanIsThrowing() && !G.charge.active) {
-      G.charge.active = true;
-      G.charge.p = 0;
-      G.charge.dir = 1;
-    } else if (G.phase === "rebuild" && G.human && G.human.hasBall && G.human.alive) {
-      humanThrowFromHand(input.pointer.x, input.pointer.y, touch);
-    } else if (canSwitch()) {
+    const ctl = G.localCtl;
+    if (!ctl || !playingHere()) return;
+    const k = ctl.kid;
+    if (isThrowing(ctl) && !ctl.charge.active) {
+      ctl.charge.active = true;
+      ctl.charge.p = 0;
+      ctl.charge.dir = 1;
+    } else if (G.phase === "rebuild" && k && k.hasBall && k.alive) {
+      doAction(handThrowAction(ctl, input.pointer.x, input.pointer.y, touch));
+    } else if (canSwitch(ctl)) {
       // Tap or click a teammate to take control of them.
       const px = input.pointer.x, py = input.pointer.y;
-      const mate = aliveOf(G.humanTeam).find((m) => m !== G.human && Math.hypot(m.x - px, m.y - 22 - py) < (touch ? 48 : 34));
-      if (mate) switchPlayer(mate);
+      const mate = aliveOf(ctl.team).find((m) => !m.ctl && Math.hypot(m.x - px, m.y - 22 - py) < (touch ? 48 : 34));
+      if (mate) doAction({ a: "switch", t: kidIdx(mate) });
     }
   }
 
   function aimUp() {
-    if (G.charge.active && humanIsThrowing()) humanReleaseThrow();
-    else G.charge.active = false;
+    const ctl = G.localCtl;
+    if (!ctl) return;
+    if (ctl.charge.active && isThrowing(ctl)) {
+      const p = ctl.charge.p;
+      ctl.charge.active = false;
+      doAction({ a: "release", p: Math.round(p * 1000) / 1000, ang: Math.round(ctl.aimAngle * 1000) / 1000 });
+      if (G.net === "guest") G.throwState = "flying";
+    } else {
+      ctl.charge.active = false;
+    }
+  }
+
+  function handThrowAction(ctl, wx, wy, touch) {
+    const near = attackerNear(wx, wy, touch ? 80 : 130);
+    if (near) { ctl.lockTarget = near; return { a: "lock", t: kidIdx(near) }; }
+    const k = ctl.kid;
+    const mate = aliveOf(k.team).find((m) => m !== k && Math.hypot(m.x - wx, m.y - wy) < 55);
+    if (mate) return { a: "pass", t: kidIdx(mate) };
+    return { a: "at", x: r1(wx), y: r1(wy) };
+  }
+
+  function cycleTarget() {
+    const ctl = G.localCtl;
+    if (!ctl) return;
+    if (isThrowing(ctl)) {
+      if (!G.aimHelp) return;
+      input.usingKeysAim = true;
+      ctl.aimAngle = Math.atan2(TOWER.y - ctl.kid.y, TOWER.x - ctl.kid.x);
+      ctl.switchFlash = 0.3;
+      sfx.tick();
+      return;
+    }
+    const h = ctl.kid;
+    if (!h || !h.hasBall || G.phase !== "rebuild") return;
+    const list = rankAttackers(h);
+    if (!list.length) return;
+    input.lockMode = "manual";
+    const i = list.indexOf(ctl.lockTarget);
+    ctl.lockTarget = list[(i + 1) % list.length];
+    sfx.tick();
+  }
+
+  function throwAtLock() {
+    const ctl = G.localCtl;
+    if (!ctl || !ctl.kid || !ctl.kid.hasBall || !ctl.lockTarget || G.phase !== "rebuild") return false;
+    doAction({ a: "lock", t: kidIdx(ctl.lockTarget) });
+    return true;
+  }
+
+  function tryDash() {
+    if (canDash(G.localCtl)) doAction({ a: "dash" });
+  }
+
+  function capturePointer(pid) {
+    try { canvas.setPointerCapture(pid); } catch (err) { /* pointer already gone */ }
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -2664,14 +3149,14 @@
       base.style.top = e.clientY + "px";
       base.classList.add("on");
       $("#joy-knob").style.transform = "translate(0px, 0px)";
-      canvas.setPointerCapture(e.pointerId);
+      capturePointer(e.pointerId);
       e.preventDefault();
       return;
     }
     input.pointer.x = w.x; input.pointer.y = w.y; input.pointer.valid = true;
     input.usingKeysAim = false;
     input.aimId = e.pointerId;
-    canvas.setPointerCapture(e.pointerId);
+    capturePointer(e.pointerId);
     aimDown(e.pointerType === "touch");
     e.preventDefault();
   });
@@ -2717,50 +3202,53 @@
   dashBtn.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     Sound.unlock();
-    if (G.human && G.human.hasBall && G.phase === "rebuild") humanThrowAtLock();
-    else if (humanCanDash()) dash(G.human);
+    const h = G.human;
+    if (h && h.hasBall && G.phase === "rebuild") throwAtLock();
+    else tryDash();
   });
   switchBtn.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     Sound.unlock();
-    if (humanIsThrowing() || (G.human && G.human.hasBall && G.phase === "rebuild")) cycleTarget();
-    else switchPlayer();
+    const h = G.human;
+    if (isThrowing(G.localCtl) || (h && h.hasBall && G.phase === "rebuild")) cycleTarget();
+    else doAction({ a: "switch", t: null });
   });
 
   const GAME_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight", "Tab", "KeyQ", "KeyE"]);
 
   window.addEventListener("keydown", (e) => {
     const playing = G.mode === "play" && currentScreen === "game";
-    if (e.code === "Escape" && !playing && !["title", "game", "pause", "result"].includes(currentScreen)) { goBack(); return; }
+    if (e.code === "Escape" && !playing && !["title", "game", "pause", "result", "join"].includes(currentScreen)) { goBack(); return; }
     if (e.code === "Escape" || e.code === "KeyP") {
-      if (playing && !G.paused) pauseGame();
-      else if (G.paused && currentScreen === "pause") resumeGame();
+      if (playing) pauseGame();
+      else if (currentScreen === "pause") resumeGame();
       return;
     }
     if (e.code === "KeyM" && !e.repeat) { toggleSound(); return; }
-    if (!playing || G.paused) return;
+    if (!playing || !playingHere()) return;
     if (GAME_KEYS.has(e.code)) e.preventDefault();
     input.keys[e.code] = true;
-    if (humanIsThrowing() && ["ArrowUp", "ArrowDown", "KeyW", "KeyS"].includes(e.code)) input.usingKeysAim = true;
+    if (isThrowing(G.localCtl) && ["ArrowUp", "ArrowDown", "KeyW", "KeyS"].includes(e.code)) input.usingKeysAim = true;
     if (e.repeat) return;
-    if (e.code === "KeyQ" || e.code === "Tab") { switchPlayer(); return; }
+    if (e.code === "KeyQ" || e.code === "Tab") { doAction({ a: "switch", t: null }); return; }
     if (e.code === "KeyE") { cycleTarget(); return; }
     if (e.code === "Space") {
-      if (G.human && G.human.hasBall && G.phase === "rebuild") { humanThrowAtLock(); return; }
-      if (humanIsThrowing()) {
+      const h = G.human;
+      if (h && h.hasBall && G.phase === "rebuild") { throwAtLock(); return; }
+      if (isThrowing(G.localCtl)) {
         if (!input.pointer.valid && !input.usingKeysAim) {
           input.usingKeysAim = true;
-          G.aimAngle = Math.atan2(TOWER.y - G.human.y, TOWER.x - G.human.x);
+          G.localCtl.aimAngle = Math.atan2(TOWER.y - h.y, TOWER.x - h.x);
         }
         aimDown();
-      } else if (humanCanDash()) dash(G.human);
+      } else tryDash();
     }
-    if ((e.code === "ShiftLeft" || e.code === "ShiftRight") && humanCanDash()) dash(G.human);
+    if (e.code === "ShiftLeft" || e.code === "ShiftRight") tryDash();
   });
 
   window.addEventListener("keyup", (e) => {
     input.keys[e.code] = false;
-    if (e.code === "Space" && G.charge.active) aimUp();
+    if (e.code === "Space" && G.localCtl && G.localCtl.charge.active) aimUp();
   });
 
   window.addEventListener("blur", () => { input.keys = {}; });
@@ -2776,20 +3264,20 @@
   // ---------------------------------------------------------------------------
   let currentScreen = "title";
   const screenStack = [];
-  const screens = ["title", "first", "setup", "tourney", "ach", "settings", "howto", "story", "pause", "result"];
+  const screens = ["title", "first", "setup", "online", "join", "tourney", "ach", "settings", "howto", "story", "pause", "result"];
 
   function showScreen(name, push) {
     if (push && currentScreen !== name) screenStack.push(currentScreen);
     if (!push) screenStack.length = 0;
     currentScreen = name;
     screens.forEach((s) => $("#screen-" + s).classList.toggle("hidden", s !== name));
-    const inGame = name === "game" || name === "pause" || (name === "settings" && G.paused);
+    const inGame = name === "game" || name === "pause" || (name === "settings" && screenStack.includes("pause"));
     $("#hud").classList.toggle("hidden", !inGame);
     $("#touch").classList.toggle("hidden", name !== "game");
     $("#coach").classList.toggle("hidden", !(name === "game" && G.ctx === "tutorial" && G.mode === "play"));
     if (name !== "game") { $("#hint").classList.add("hidden"); hintText = ""; }
     if (name === "title") { updateRecord(); refreshVisitCount(); }
-    const focusable = name !== "game" && $("#screen-" + name + " .btn-primary");
+    const focusable = name !== "game" && $("#screen-" + name + " .btn-primary:not([disabled])");
     if (focusable && !input.isTouch) setTimeout(() => focusable.focus({ preventScroll: true }), 50);
   }
 
@@ -2848,9 +3336,7 @@
 
   function hudReset() {
     Object.keys(hudCache).forEach((k) => delete hudCache[k]);
-    for (let tm = 0; tm < 2; tm++) {
-      $("#hud-dot-" + tm).style.background = G.teams[tm].color;
-    }
+    for (let tm = 0; tm < 2; tm++) $("#hud-dot-" + tm).style.background = G.teams[tm].color;
     const wrap = $("#hud-stones");
     wrap.innerHTML = "";
     STONE_W.forEach((w) => {
@@ -2868,14 +3354,21 @@
     el.classList.add("bump");
   }
 
+  function teamTag(tm) {
+    if (tm === localTeam()) return ` ${t("you")}`;
+    if (G.online && G.online.mode === "versus") return ` ${t("on.friendTag")}`;
+    return "";
+  }
+
   function updateHud() {
     if (G.mode !== "play") return;
     for (let tm = 0; tm < 2; tm++) {
-      setText("hud-name-" + tm, tm === G.humanTeam ? `${teamLabel(tm)} ${t("you")}` : teamLabel(tm));
+      setText("hud-name-" + tm, teamLabel(tm) + teamTag(tm));
       setText("hud-score-" + tm, num(G.scores[tm]));
       setText("hud-role-" + tm, tm === G.attacking ? t("role.att") : t("role.def"));
     }
-    const youAttack = G.attacking === G.humanTeam;
+    const ctl = G.localCtl;
+    const youAttack = G.attacking === localTeam();
     const h = G.human;
     const tm = input.isTouch ? "touch" : "mouse";
     let phase = "";
@@ -2883,13 +3376,13 @@
     if (G.phase === "intro") phase = t("phase.round", { n: G.round });
     else if (G.phase === "throw") {
       const th = currentThrower();
-      if (youAttack) phase = th && th.isHuman ? t("phase.yourThrow") : t("phase.theirThrow", { name: th ? kidName(th) : "" });
+      if (youAttack) phase = th && th === h ? t("phase.yourThrow") : t("phase.theirThrow", { name: th ? kidName(th) : "" });
       else phase = t("phase.defendThrow");
       if (G.ctx !== "tutorial") timer = t("phase.throwOf", { i: Math.min(G.throwIdx + 1, G.throwOrder.length), n: G.throwOrder.length });
     } else if (G.phase === "rebuild") {
       phase = youAttack ? t("phase.rebuild") : t("phase.stop");
       if (!(G.ctx === "tutorial" && G.tut.step < 5)) {
-        const s = Math.ceil(G.rebuildT);
+        const s = Math.max(0, Math.ceil(G.rebuildT));
         timer = `${num(Math.floor(s / 60))}:${num(String(s % 60).padStart(2, "0"))}`;
       }
     } else if (G.phase === "roundEnd") phase = t("phase.over");
@@ -2909,37 +3402,36 @@
       });
     }
 
-    // Tutorial coach replaces the hint bar.
     if (G.ctx === "tutorial" && G.tut) {
       setText("coach-step", t("c.step", { i: Math.min(G.tut.step + 1, 6), n: 6 }));
       setText("coach-text", tutorialText());
       setHint("");
     } else {
-      setHint(hintFor(h, youAttack, tm));
+      setHint(hintFor(ctl, h, youAttack, tm));
     }
 
     const holding = !!(h && h.alive && h.hasBall && G.phase === "rebuild");
-    const throwing = humanIsThrowing();
-    const canDash = humanCanDash();
-    dashBtn.classList.toggle("hidden", !(holding || canDash));
-    dashBtn.classList.toggle("cooldown", !holding && canDash && G.human.dashCD > 0);
+    const throwing = isThrowing(ctl);
+    const dashable = canDash(ctl);
+    dashBtn.classList.toggle("hidden", !(holding || dashable));
+    dashBtn.classList.toggle("cooldown", !holding && dashable && h.dashCD > 0);
     const dashLabel = holding ? t("btn.throw") : t("btn.dash");
     if (dashBtn.textContent !== dashLabel) dashBtn.textContent = dashLabel;
-    switchBtn.classList.toggle("hidden", !(holding || (throwing && G.aimHelp) || canSwitch()));
+    switchBtn.classList.toggle("hidden", !(holding || (throwing && G.aimHelp) || canSwitch(ctl)));
     const switchLabel = holding || throwing ? t("btn.target") : t("btn.switch");
     if (switchBtn.textContent !== switchLabel) switchBtn.textContent = switchLabel;
   }
 
-  function hintFor(h, youAttack, tm) {
-    if (!h) return "";
+  function hintFor(ctl, h, youAttack, tm) {
+    if (!ctl) return "";
     if (G.phase === "throw") {
-      if (!h.alive) return t("h.out");
-      if (humanIsThrowing()) return t("h.throw." + tm) + (G.aimHelp ? t("h.lock." + tm) : "");
+      if (!h || !h.alive) return t("h.out");
+      if (isThrowing(ctl)) return t("h.throw." + tm) + (G.aimHelp ? t("h.lock." + tm) : "");
       if (youAttack) return t("h.nextThrower");
       return t("h.defThrow." + tm);
     }
     if (G.phase !== "rebuild") return "";
-    if (!h.alive) return t("h.out");
+    if (!h || !h.alive) return t("h.out");
     if (youAttack) {
       if (h.carrying) return isNextStone(h.carrying) ? t("h.carry") : t("h.carryWrong");
       if (pileNext()) return t("h.pile");
@@ -2960,9 +3452,11 @@
   }
 
   function showResult(won, unlockedField) {
-    const s = G.stats;
+    const s = G.stats || newStats();
     const again = $("#btn-again");
     $("#result-unlock").classList.add("hidden");
+    $("#result-wait").classList.add("hidden");
+    again.classList.remove("hidden");
     if (G.ctx === "tutorial") {
       $("#result-icon").textContent = "🎓";
       $("#result-title").textContent = t("result.tutorial");
@@ -2979,6 +3473,13 @@
         again.dataset.action = "tourney";
         if (won && settings.tourney.champion && G.stage === TOURNEY.length - 1) {
           $("#result-score").textContent += " · " + t("tourney.champion");
+        }
+      } else if (G.ctx === "online") {
+        again.textContent = t("result.again");
+        again.dataset.action = "online";
+        if (G.net === "guest") {
+          again.classList.add("hidden");
+          $("#result-wait").classList.remove("hidden");
         }
       } else {
         again.textContent = t("result.again");
@@ -3090,8 +3591,7 @@
         <div><div class="op-name">${t(op.key)}</div><div class="op-meta">${t("diff." + op.diff)} · ${num(op.size)}v${num(op.size)} · ${t("field." + op.field)}</div></div>
         <span class="status">${status}</span></li>`;
     }).join("") + (settings.tourney.champion ? `<li class="ladder-champion" style="display:block">${t("tourney.champion")}</li>` : "");
-    const btn = $("#btn-tourney-play");
-    btn.textContent = stage >= TOURNEY.length ? t("tourney.again") : t("tourney.play");
+    $("#btn-tourney-play").textContent = stage >= TOURNEY.length ? t("tourney.again") : t("tourney.play");
   }
 
   // --- Achievements screen ---------------------------------------------------
@@ -3119,8 +3619,7 @@
     });
     $$("[data-pref-check]").forEach((cb) => {
       cb.addEventListener("change", () => {
-        const key = cb.dataset.prefCheck;
-        settings[key] = cb.checked;
+        settings[cb.dataset.prefCheck] = cb.checked;
         saveSettings();
         applyAudioPrefs();
         syncSoundUi();
@@ -3158,6 +3657,8 @@
     updateRecord();
     if (currentScreen === "tourney") buildLadder();
     if (currentScreen === "ach") buildAchievements();
+    if (joinCode) $("#join-body").textContent = t("on.joinBody", { code: joinCode });
+    refreshOnlineStatus();
   }
 
   function applyAudioPrefs() {
@@ -3195,7 +3696,6 @@
     shade.addColorStop(1, "rgba(14,24,12,0.85)");
     g.fillStyle = shade;
     g.fillRect(0, 0, 1200, 630);
-    // Stone stack
     for (let i = 0; i < 7; i++) {
       const w = 120 - i * 13, y = 250 - i * 22;
       g.fillStyle = "#8f3524"; g.fillRect(600 - w / 2, y + 6, w, 14);
@@ -3219,7 +3719,7 @@
 
   function shareResult() {
     const text = t(G.lastWon ? "share.won" : "share.played", { a: teamLabel(0), b: teamLabel(1), s0: G.scores[0], s1: G.scores[1] });
-    const url = location.href.split("#")[0];
+    const url = location.origin + location.pathname;
     makeShareCard().toBlob((blob) => {
       if (!blob) return;
       const file = new File([blob], "saat-chara.png", { type: "image/png" });
@@ -3238,7 +3738,191 @@
     }, "image/png");
   }
 
-  // --- Flow ------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Online lobby
+  // ---------------------------------------------------------------------------
+  let onlineState = "idle";     // idle | creating | waiting | ready | joining | joined | lost | failed | noRoom
+  let roomCode = null;
+  let joinCode = null;
+  let joinTimer = null;
+
+  function setOnlineState(s) {
+    onlineState = s;
+    refreshOnlineStatus();
+  }
+
+  function refreshOnlineStatus() {
+    const map = {
+      creating: ["on.creating", "wait"], waiting: ["on.waiting", "wait"], ready: ["on.connected", "ok"],
+      joining: ["on.joining", "wait"], joined: ["on.joined", "ok"], lost: ["on.lost", "err"],
+      failed: ["on.failed", "err"], noRoom: ["on.noRoom", "err"],
+    };
+    const m = map[onlineState];
+    for (const id of ["#online-status", "#join-status"]) {
+      const el = $(id);
+      el.textContent = m ? t(m[0]) : "";
+      el.className = "online-status" + (m ? " " + m[1] : "");
+    }
+    const go = $("#btn-online-go");
+    const hosting = Net.role === "host";
+    $("#online-setup").classList.toggle("hidden", hosting);
+    $("#online-room").classList.toggle("hidden", !hosting || !roomCode);
+    go.textContent = hosting ? t("on.start") : t("on.create");
+    go.disabled = onlineState === "creating" || (hosting && onlineState !== "ready");
+    $("#btn-online-back").textContent = hosting ? t("on.leave") : t("common.back");
+    const joinBtn = $("#btn-join");
+    joinBtn.classList.toggle("hidden", onlineState === "joined");
+    joinBtn.disabled = onlineState === "joining";
+  }
+
+  function buildOnlineScreen() {
+    $$(".mode-card").forEach((c) => c.addEventListener("click", () => {
+      settings.online.mode = c.dataset.mode; saveSettings(); syncOnline(); sfx.click();
+    }));
+    $$("[data-online] button").forEach((btn) => btn.addEventListener("click", () => {
+      const key = btn.parentElement.dataset.online;
+      settings.online[key] = key === "difficulty" ? btn.dataset.value : Number(btn.dataset.value);
+      saveSettings(); syncOnline(); sfx.click();
+    }));
+    $("#btn-online-go").addEventListener("click", () => {
+      sfx.click();
+      if (Net.role === "host") { if (Net.connected) hostStartMatch(); return; }
+      createRoom();
+    });
+    $("#btn-online-back").addEventListener("click", () => { sfx.click(); leaveRoom(); goBack(); });
+    $("#btn-copy-link").addEventListener("click", () => {
+      const link = Net.linkFor(roomCode);
+      const done = () => {
+        $("#btn-copy-link").textContent = t("on.copied");
+        setTimeout(() => { $("#btn-copy-link").textContent = t("on.copy"); }, 1800);
+      };
+      if (navigator.clipboard) navigator.clipboard.writeText(link).then(done).catch(selectLink);
+      else selectLink();
+    });
+    $("#btn-share-link").addEventListener("click", () => {
+      const url = Net.linkFor(roomCode);
+      if (navigator.share) navigator.share({ title: "Saat Chara", text: t("on.shareText"), url }).catch(() => {});
+      else window.open(`https://wa.me/?text=${encodeURIComponent(t("on.shareText") + " " + url)}`, "_blank", "noopener");
+    });
+    $("#btn-join").addEventListener("click", () => { Sound.unlock(); sfx.click(); joinRoom(); });
+    $("#btn-join-cancel").addEventListener("click", () => { sfx.click(); quitToMenu(); });
+    syncOnline();
+  }
+
+  function selectLink() {
+    const r = document.createRange();
+    r.selectNodeContents($("#room-link"));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
+  function syncOnline() {
+    const o = settings.online;
+    $$(".mode-card").forEach((c) => {
+      const on = c.dataset.mode === o.mode;
+      c.classList.toggle("active", on);
+      c.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    $$("[data-online]").forEach((seg) => {
+      seg.querySelectorAll("button").forEach((btn) => btn.classList.toggle("active", String(o[seg.dataset.online]) === btn.dataset.value));
+    });
+    $("#online-diff").classList.toggle("hidden", o.mode !== "coop");
+  }
+
+  function createRoom() {
+    roomCode = null;
+    setOnlineState("creating");
+    Net.host({
+      ready(code) {
+        roomCode = code;
+        $("#room-code").textContent = code;
+        $("#room-link").textContent = Net.linkFor(code);
+        setOnlineState("waiting");
+      },
+      connect() { setOnlineState("ready"); sfx.whistle(); },
+      data: hostOnData,
+      close: onNetClosed,
+      error() { setOnlineState("failed"); },
+    });
+  }
+
+  function hostStartMatch() {
+    Sound.unlock();
+    applyAudioPrefs();
+    Sound.startMusic();
+    G.paused = false;
+    input.keys = {};
+    clearTimeout(resultTimer);
+    $("#banner").classList.add("hidden");
+    G.lastOpts = { ctx: "online", mode: settings.online.mode };
+    startMatch(G.lastOpts);
+    Net.send(matchSetupMessage());
+    showScreen("game");
+  }
+
+  function joinRoom() {
+    setOnlineState("joining");
+    clearTimeout(joinTimer);
+    joinTimer = setTimeout(() => { if (onlineState === "joining") { Net.close(); setOnlineState("failed"); } }, 20000);
+    Net.join(joinCode, {
+      connect() {
+        clearTimeout(joinTimer);
+        setOnlineState("joined");
+        Net.send({ t: "hello" });
+      },
+      data(m) {
+        if (!m) return;
+        if (m.t === "start") {
+          Sound.unlock();
+          applyAudioPrefs();
+          Sound.startMusic();
+          clearTimeout(resultTimer);
+          $("#banner").classList.add("hidden");
+          startGuestMatch(m);
+          showScreen("game");
+        } else if (m.t === "s" && G.net === "guest") {
+          applySnapshot(m);
+        }
+      },
+      close: onNetClosed,
+      error(type) {
+        clearTimeout(joinTimer);
+        setOnlineState(type === "peer-unavailable" ? "noRoom" : "failed");
+      },
+    });
+  }
+
+  function onNetClosed() {
+    const wasGuest = Net.role === "guest" || G.net === "guest";
+    const inMatch = G.mode === "play" && G.ctx === "online";
+    Net.close();
+    roomCode = null;
+    clearTimeout(resultTimer);
+    if (inMatch) {
+      Sound.stopAmbience();
+      startAttract();
+    }
+    setOnlineState("lost");
+    if (wasGuest) { showScreen("join"); }
+    else { showScreen("online", false); screenStack.push("title"); }
+  }
+
+  function leaveRoom() {
+    clearTimeout(joinTimer);
+    Net.close();
+    roomCode = null;
+    setOnlineState("idle");
+  }
+
+  function clearRoomFromUrl() {
+    joinCode = null;
+    if (Net.roomFromUrl() && history.replaceState) history.replaceState(null, "", location.pathname);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Flow
+  // ---------------------------------------------------------------------------
   function beginMatch(opts) {
     Sound.unlock();
     applyAudioPrefs();
@@ -3261,11 +3945,14 @@
     beginMatch({ ctx: "tourney", stage: settings.tourney.stage });
   }
 
+  // Online matches keep running while the menu is open.
   function pauseGame() {
-    if (G.mode !== "play" || G.paused) return;
-    G.paused = true;
-    G.charge.active = false;
+    if (G.mode !== "play") return;
+    if (!G.net) G.paused = true;
+    G.ctls.forEach((c) => { c.charge.active = false; });
     input.keys = {};
+    $("#pause-online").classList.toggle("hidden", !G.net);
+    $("#btn-restart").classList.toggle("hidden", G.net === "guest");
     showScreen("pause");
   }
 
@@ -3276,6 +3963,8 @@
   }
 
   function quitToMenu() {
+    if (G.net || Net.role) leaveRoom();
+    clearRoomFromUrl();
     G.paused = false;
     clearTimeout(resultTimer);
     clearTimeout(bannerTimer);
@@ -3289,6 +3978,9 @@
     Sound.unlock(); sfx.click();
     if (!settings.tutorialDone) openScreen("first");
     else openScreen("setup");
+  });
+  $("#btn-online").addEventListener("click", () => {
+    Sound.unlock(); sfx.click(); syncOnline(); setOnlineState("idle"); openScreen("online");
   });
   $("#btn-first-yes").addEventListener("click", () => beginMatch({ ctx: "tutorial" }));
   $("#btn-first-no").addEventListener("click", () => {
@@ -3314,7 +4006,10 @@
   $("#btn-pause").addEventListener("click", () => { sfx.click(); pauseGame(); });
   $("#btn-sound").addEventListener("click", toggleSound);
   $("#btn-resume").addEventListener("click", () => { sfx.click(); resumeGame(); });
-  $("#btn-restart").addEventListener("click", () => beginMatch(G.lastOpts));
+  $("#btn-restart").addEventListener("click", () => {
+    if (G.net === "host") hostStartMatch();
+    else beginMatch(G.lastOpts);
+  });
   $("#btn-pause-settings").addEventListener("click", () => { sfx.click(); syncSettings(); openScreen("settings"); });
   $("#btn-quit").addEventListener("click", () => { sfx.click(); quitToMenu(); });
   $("#coach-skip").addEventListener("click", () => {
@@ -3323,6 +4018,7 @@
   $("#btn-again").addEventListener("click", () => {
     const action = $("#btn-again").dataset.action;
     if (action === "tourney") startTourneyMatch();
+    else if (action === "online") { if (Net.connected) hostStartMatch(); else quitToMenu(); }
     else beginMatch({ ctx: "quick" });
   });
   $("#btn-share").addEventListener("click", () => { sfx.click(); shareResult(); });
@@ -3330,8 +4026,8 @@
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      if (G.mode === "play" && currentScreen === "game") pauseGame();
-      Sound.suspend();
+      if (G.mode === "play" && currentScreen === "game" && !G.net) pauseGame();
+      if (!G.net) Sound.suspend();
     } else {
       Sound.resume();
     }
@@ -3349,13 +4045,19 @@
   function frame(now) {
     let dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    if (!G.paused) {
+    if (G.net === "guest") {
+      guestUpdate(dt);
+    } else if (!G.paused) {
       if (G.slowmo > 0) { G.slowmo -= dt; dt *= 0.4; }
       let rem = dt;
       while (rem > 1e-6) {
         const s = Math.min(STEP, rem);
         update(s);
         rem -= s;
+      }
+      if (G.net === "host" && Net.connected) {
+        netSendT += dt;
+        if (netSendT >= SNAPSHOT_EVERY) { netSendT = 0; hostSnapshot(); }
       }
     }
     updateCamera(dt);
@@ -3370,11 +4072,19 @@
   resize();
   buildSetup();
   buildSettingsScreen();
+  buildOnlineScreen();
   syncSettings();
   syncSoundUi();
   applyAudioPrefs();
   startAttract();
-  showScreen("title");
+  joinCode = Net.roomFromUrl();
+  if (joinCode) {
+    $("#join-body").textContent = t("on.joinBody", { code: joinCode });
+    setOnlineState("idle");
+    showScreen("join");
+  } else {
+    showScreen("title");
+  }
   Counter.trackErrors();
   Counter.trackVisit();
   setTimeout(refreshVisitCount, 1500);

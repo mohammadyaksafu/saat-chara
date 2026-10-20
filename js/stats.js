@@ -12,7 +12,7 @@
       visitors: "Unique visitors", visitorsSub: "different browsers",
       today: "Visits today", matches: "Matches played", matchesSub: "quick matches and tournament",
       dailyTitle: "Visits per day", dailyDesc: "Last 14 days (UTC)", table: "Show as table",
-      date: "Date", visitsCol: "Visits", tutorials: "Tutorials finished", champions: "Upazila champions",
+      date: "Date", visitsCol: "Visits", online: "Online matches", tutorials: "Tutorials finished", champions: "Upazila champions",
       perVisitor: "Visits per visitor", devices: "Devices", mobile: "Phones & tablets", desktop: "Computers",
       note: "Counts are anonymous: no cookies, names or IP addresses are stored by this game. Numbers come from the free <a href=\"https://jasoncameron.dev/abacus/\" rel=\"noopener\">Abacus</a> counter and update in real time.",
       loading: "Loading…", updated: "Updated {time}", failed: "Couldn't reach the counter. Check your connection and try Refresh.",
@@ -24,7 +24,7 @@
       visitors: "আলাদা দর্শক", visitorsSub: "আলাদা ব্রাউজার",
       today: "আজকের ভিজিট", matches: "খেলা ম্যাচ", matchesSub: "দ্রুত খেলা ও টুর্নামেন্ট",
       dailyTitle: "দিনভিত্তিক ভিজিট", dailyDesc: "গত ১৪ দিন (UTC)", table: "টেবিল হিসেবে দেখো",
-      date: "তারিখ", visitsCol: "ভিজিট", tutorials: "অনুশীলন শেষ করেছে", champions: "উপজেলা চ্যাম্পিয়ন",
+      date: "তারিখ", visitsCol: "ভিজিট", online: "অনলাইন ম্যাচ", tutorials: "অনুশীলন শেষ করেছে", champions: "উপজেলা চ্যাম্পিয়ন",
       perVisitor: "দর্শকপ্রতি ভিজিট", devices: "ডিভাইস", mobile: "ফোন ও ট্যাবলেট", desktop: "কম্পিউটার",
       note: "গণনা সম্পূর্ণ বেনামি: এই খেলা কোনো কুকি, নাম বা আইপি ঠিকানা রাখে না। সংখ্যাগুলো আসে বিনামূল্যের <a href=\"https://jasoncameron.dev/abacus/\" rel=\"noopener\">Abacus</a> কাউন্টার থেকে।",
       loading: "লোড হচ্ছে…", updated: "হালনাগাদ {time}", failed: "কাউন্টারে পৌঁছানো যায়নি। সংযোগ দেখে আবার চেষ্টা করো।",
@@ -166,10 +166,10 @@
   async function load() {
     $("#status").textContent = tr("loading");
     const days = lastDays();
-    const keys = ["visits", "visitors", "matches", "tutorials", "champions", "device-mobile", "device-desktop"];
+    const keys = ["visits", "visitors", "matches", "tutorials", "champions", "device-mobile", "device-desktop", "online-matches"];
     const main = await getMany(keys);
     const daily = await getMany(days.map((d) => "day-" + C.day(d)));
-    const [visits, visitors, matches, tutorials, champions, mobile, desktop] = main;
+    const [visits, visitors, matches, tutorials, champions, mobile, desktop, online] = main;
 
     if (main.every((v) => v == null)) {
       $("#status").textContent = tr("failed");
@@ -178,6 +178,7 @@
     setValue("#v-visits", visits == null ? null : fmt(visits));
     setValue("#v-visitors", visitors == null ? null : fmt(visitors));
     setValue("#v-matches", matches == null ? null : fmt(matches));
+    setValue("#v-online", online == null ? null : fmt(online));
     setValue("#v-tutorials", tutorials == null ? null : fmt(tutorials));
     setValue("#v-champions", champions == null ? null : fmt(champions));
     setValue("#v-today", daily[daily.length - 1] == null ? null : fmt(daily[daily.length - 1]));

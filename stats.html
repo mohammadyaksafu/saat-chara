@@ -85,7 +85,7 @@
     .tile .value { font-size: clamp(1.8rem, 5vw, 2.6rem); font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
     .tile .sub { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
     .tile.hero .value { color: var(--brick); }
-    .tiles.small { grid-template-columns: repeat(3, 1fr); }
+    .tiles.small { grid-template-columns: repeat(4, 1fr); }
     .tiles.small .value { font-size: clamp(1.4rem, 4vw, 1.9rem); }
 
     .panel {
@@ -144,12 +144,10 @@
 
     @media (max-width: 760px) {
       .tiles { grid-template-columns: repeat(2, 1fr); }
-      .tiles.small { grid-template-columns: 1fr 1fr 1fr; }
+      .tiles.small { grid-template-columns: 1fr 1fr; }
       .chart svg { height: 200px; }
     }
-    @media (max-width: 420px) {
-      .tiles.small { grid-template-columns: 1fr; }
-    }
+    
     @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
   </style>
 </head>
@@ -187,6 +185,7 @@
     </section>
 
     <div class="tiles small">
+      <div class="tile"><div class="label" data-s="online">Online matches</div><div class="value skeleton" id="v-online">00</div></div>
       <div class="tile"><div class="label" data-s="tutorials">Tutorials finished</div><div class="value skeleton" id="v-tutorials">00</div></div>
       <div class="tile"><div class="label" data-s="champions">Upazila champions</div><div class="value skeleton" id="v-champions">0</div></div>
       <div class="tile"><div class="label" data-s="perVisitor">Visits per visitor</div><div class="value skeleton" id="v-ratio">0.0</div></div>

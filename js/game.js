@@ -2051,6 +2051,9 @@
     if (G.mode === "play") Sound.startAmbience(id);
   }
 
+  // Phones and touch screens get a clean field: fewer words, smaller overlays.
+  const compactUI = () => input.isTouch || view.base < 0.62;
+
   const toWorld = (cx, cy) => ({ x: (cx - view.cw / 2) / cam.k + cam.x, y: (cy - view.ch / 2) / cam.k + cam.y });
 
   // ---------------------------------------------------------------------------
@@ -2449,7 +2452,8 @@
     drawAimUI();
     drawFloaters();
 
-    if (cam.follow) drawMinimap();
+    // The overview map matters while chasing stones; during throws it would cover the meter.
+    if (cam.follow && G.phase === "rebuild") drawMinimap();
   }
 
   function shadowAt(x, y, r, a) {
@@ -2794,13 +2798,19 @@
     const w = G.wind;
     const level = Math.abs(w) < 0.05 ? 0 : Math.abs(w) < 0.4 ? 1 : Math.abs(w) < 0.75 ? 2 : 3;
     ctx.fillStyle = "rgba(43,33,24,0.78)";
-    roundRect(ctx, x - 52, y - 16, 104, 32, 16);
+    const small = compactUI();
+    if (small) {
+      if (!level) return;
+      roundRect(ctx, x - 4, y - 16, 56, 32, 16);
+    } else {
+      roundRect(ctx, x - 52, y - 16, 104, 32, 16);
+    }
     ctx.fill();
     ctx.font = "800 14px 'Baloo Da 2', system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#fff7e8";
-    ctx.fillText(level ? t("w.label") : t("w.calm"), x - 40, y + 1);
+    if (!small) ctx.fillText(level ? t("w.label") : t("w.calm"), x - 40, y + 1);
     if (level) {
       const dir = Math.sign(w);
       const ax = x + 22;
@@ -2910,7 +2920,7 @@
       const along = tx * Math.cos(ctl.aimAngle) + ty * Math.sin(ctl.aimAngle);
       const off = Math.abs(-tx * Math.sin(ctl.aimAngle) + ty * Math.cos(ctl.aimAngle));
       const onTarget = G.aimHelp && along > 0 && off < TOWER_HIT_R - 4;
-      drawReticle(TOWER.x, TOWER.y - 26, 42, onTarget ? "#7dff9a" : "#ffffff", onTarget ? t("tgt.on") : t("tgt.target"));
+      drawReticle(TOWER.x, TOWER.y - 26, 42, onTarget ? "#7dff9a" : "#ffffff", compactUI() ? "" : onTarget ? t("tgt.on") : t("tgt.target"));
 
       const a = ctl.aimAngle;
       const len = 150;
@@ -2964,7 +2974,7 @@
       ctx.lineTo(tk.x, tk.y - 26);
       ctx.stroke();
       ctx.setLineDash([]);
-      drawReticle(tk.x, tk.y - 26, 30, "#ff6e5a", kidName(tk).toUpperCase());
+      drawReticle(tk.x, tk.y - 26, 30, "#ff6e5a", compactUI() ? "" : kidName(tk).toUpperCase());
     } else if (G.phase === "rebuild" && h.hasBall && input.pointer.valid) {
       const px = input.pointer.x, py = input.pointer.y;
       const mate = aliveOf(h.team).find((m) => m !== h && Math.hypot(m.x - px, m.y - py) < 55);
@@ -2994,7 +3004,8 @@
 
   function drawMinimap() {
     const { dpr } = view;
-    const mw = 150, mh = 84, mx = 12, my = view.ch - mh - 14;
+    const small = compactUI();
+    const mw = small ? 112 : 150, mh = small ? 63 : 84, mx = small ? 8 : 12, my = small ? 52 : view.ch - mh - 14;
     const sx = mw / W, sy = mh / H;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = "rgba(20,40,16,0.78)";
@@ -3295,14 +3306,14 @@
     const el = $("#banner");
     $("#banner-main").textContent = main;
     $("#banner-main").lang = bengali ? "bn" : I18N.lang;
-    $("#banner-sub").textContent = sub || "";
+    $("#banner-sub").textContent = compactUI() ? "" : sub || "";
     el.style.setProperty("--banner-shade", shade || "#8f3524");
     el.classList.remove("hidden");
     el.style.animation = "none";
     void el.offsetWidth;
     el.style.animation = "";
     clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(() => el.classList.add("hidden"), (secs || 1.5) * 1000);
+    bannerTimer = setTimeout(() => el.classList.add("hidden"), (secs || 1.5) * (compactUI() ? 650 : 1000));
   }
 
   let toastTimer = null;
@@ -3378,7 +3389,7 @@
       const th = currentThrower();
       if (youAttack) phase = th && th === h ? t("phase.yourThrow") : t("phase.theirThrow", { name: th ? kidName(th) : "" });
       else phase = t("phase.defendThrow");
-      if (G.ctx !== "tutorial") timer = t("phase.throwOf", { i: Math.min(G.throwIdx + 1, G.throwOrder.length), n: G.throwOrder.length });
+      if (G.ctx !== "tutorial" && !compactUI()) timer = t("phase.throwOf", { i: Math.min(G.throwIdx + 1, G.throwOrder.length), n: G.throwOrder.length });
     } else if (G.phase === "rebuild") {
       phase = youAttack ? t("phase.rebuild") : t("phase.stop");
       if (!(G.ctx === "tutorial" && G.tut.step < 5)) {
